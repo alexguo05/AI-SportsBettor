@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+.env
+*.log
+
+# Data (keep structure, ignore content)
+data/
+data/raw/*
+!data/raw/.gitkeep
+data/ref/article_cache.json
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
