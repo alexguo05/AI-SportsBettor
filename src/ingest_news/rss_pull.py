@@ -38,6 +38,30 @@ NFL_RSS_FEEDS = [
         "name": "ProFootballTalk",
         "url": "https://profootballtalk.nbcsports.com/feed/",
     },
+    {
+        "name": "Yahoo_Sports_NFL",
+        "url": "https://sports.yahoo.com/nfl/rss.xml",
+    },
+    {
+        "name": "FoxSports_NFL",
+        "url": "https://api.foxsports.com/v1/rss?partnerKey=zBaFxRyGKCfxBagJG9b8pqLyndmvo7UU&tag=nfl",
+    },
+    {
+        "name": "BBC_AmericanFootball",
+        "url": "https://feeds.bbci.co.uk/sport/american-football/rss.xml",
+    },
+    {
+        "name": "ProFootballNetwork",
+        "url": "https://profootballnetwork.com/feed",
+    },
+    {
+        "name": "Guardian_NFL",
+        "url": "https://www.theguardian.com/sport/nfl/rss",
+    },
+    {
+        "name": "Sports_Illustrated",
+        "url": "https://www.si.com/nfl",
+    },
     # Additional feeds can be added here as discovered
     # Examples: Yahoo Sports, Bleacher Report, The Athletic, etc.
 ]
@@ -192,6 +216,73 @@ def clean_html(html_content: str) -> str:
     text = " ".join(text.split())
     
     return text
+
+
+def extract_author(entry: Any) -> Optional[str]:
+    """
+    Extract author from a feed entry using common fields with fallbacks.
+    
+    Tries, in order:
+    - entry.author
+    - entry.author_detail.name
+    - entry.authors (list of authors, joined by ", ")
+    - entry.dc_creator (Dublin Core creator)
+    
+    Returns:
+        Author string or None
+    """
+    # 1) author
+    try:
+        author = entry.get("author")
+        if author:
+            return str(author).strip() or None
+    except Exception:
+        pass
+    
+    # 2) author_detail.name
+    try:
+        author_detail = getattr(entry, "author_detail", None)
+        if isinstance(author_detail, dict):
+            name = author_detail.get("name")
+            if name:
+                return str(name).strip() or None
+        else:
+            # Some parsers may expose attributes
+            name = getattr(author_detail, "name", None)
+            if name:
+                return str(name).strip() or None
+    except Exception:
+        pass
+    
+    # 3) authors list
+    try:
+        authors = getattr(entry, "authors", None)
+        if authors and isinstance(authors, list):
+            names: list[str] = []
+            for a in authors:
+                if isinstance(a, dict):
+                    nm = a.get("name") or a.get("value")
+                else:
+                    nm = getattr(a, "name", None) or getattr(a, "value", None)
+                if nm:
+                    nm_s = str(nm).strip()
+                    if nm_s:
+                        names.append(nm_s)
+            if names:
+                # Join multiple authors if present
+                return ", ".join(dict.fromkeys(names))
+    except Exception:
+        pass
+    
+    # 4) Dublin Core creator
+    try:
+        dc_creator = entry.get("dc_creator")
+        if dc_creator:
+            return str(dc_creator).strip() or None
+    except Exception:
+        pass
+    
+    return None
 
 
 def parse_timestamp(timestamp_str: Optional[str]) -> Optional[datetime]:
@@ -455,6 +546,7 @@ def parse_feed_entry(
         "url_raw": url_raw,  # Keep original for audit trail
         "headline": title,
         "body": body_clean,
+        "author": extract_author(entry),
         "t_published_utc": t_published.isoformat() if t_published else None,
         "t_updated_utc": t_updated.isoformat() if t_updated else None,
         "t_first_seen_utc": t_first_seen.isoformat(),
@@ -470,6 +562,10 @@ def parse_feed_entry(
             "updated": entry.get("updated"),
             "summary": entry.get("summary"),
             "id": entry.get("id"),
+            "author": entry.get("author"),
+            "author_detail": getattr(entry, "author_detail", None),
+            "authors": getattr(entry, "authors", None),
+            "dc_creator": entry.get("dc_creator"),
         },
     }
     

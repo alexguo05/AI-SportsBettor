@@ -1,4 +1,4 @@
-d"""Logging configuration for the application."""
+"""Logging configuration for the application."""
 import logging
 import sys
 from pathlib import Path
