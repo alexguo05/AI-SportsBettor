@@ -37,3 +37,4 @@ build/
 dist/
 *.egg-info/
 
+commands_test.txt
