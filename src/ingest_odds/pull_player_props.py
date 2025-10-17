@@ -5,10 +5,15 @@ from pathlib import Path
 
 import httpx
 from dotenv import dotenv_values
+from google.cloud import storage
+from google.oauth2 import service_account
 
 
 API_BASE = "https://api.the-odds-api.com/v4"
 SPORT = "americanfootball_nfl"
+GCS_BUCKET = "ai-sports-bettor"
+# Service account key path relative to this script (../ai-sports-bettor-*.json under src/)
+GCS_SA_KEY_PATH = (Path(__file__).resolve().parents[1] / "ai-sports-bettor-559e8837739f.json")
 
 
 def implied_prob_from_decimal(decimal_odds: float) -> float:
@@ -19,7 +24,7 @@ def implied_prob_from_decimal(decimal_odds: float) -> float:
 
 def main() -> int:
     # Load key/value pairs directly from .env in this directory (no process env usage)
-    dotenv_path = Path(__file__).parent / ".env"
+    dotenv_path = Path(__file__).parent / "../.env"
     config = dotenv_values(dotenv_path) if dotenv_path.exists() else {}
 
     api_key = config.get("ODDS_API_KEY")
@@ -128,29 +133,31 @@ def main() -> int:
         print(f"ERROR: request failed: {e}", file=sys.stderr)
         return 2
 
-    # Persist combined results
+    # Build payload and upload directly to GCS (no local write)
     try:
-        project_root = Path(__file__).resolve().parents[2]
-        odds_dir = project_root / "data" / "raw" / "odds"
-        odds_dir.mkdir(parents=True, exist_ok=True)
-        out_path = odds_dir / f"player_props_events_{ts}.json"
-        with out_path.open("w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "fetched_at": dt_utc.isoformat(),
-                    "sport": SPORT,
-                    "regions": ["us"],
-                    "markets": markets_list,
-                    "events_count": len(all_results),
-                    "results": all_results,
-                },
-                f,
-                indent=2,
-                ensure_ascii=False,
-            )
-        print(f"Saved player props for {len(all_results)} events to data/raw/odds/{out_path.name}")
-    except Exception as write_err:
-        print(f"WARNING: failed to write JSON to data/raw/odds: {write_err}", file=sys.stderr)
+        payload = {
+            "fetched_at": dt_utc.isoformat(),
+            "sport": SPORT,
+            "regions": ["us"],
+            "markets": markets_list,
+            "events_count": len(all_results),
+            "results": all_results,
+        }
+
+        # Use explicit service account credentials for GCS
+        creds = service_account.Credentials.from_service_account_file(str(GCS_SA_KEY_PATH))
+        client = storage.Client(credentials=creds, project=creds.project_id)
+        bucket = client.bucket(GCS_BUCKET)
+        blob_name = f"player_props_events_{ts}.json"
+        blob_path = f"raw/odds/{blob_name}"
+        blob = bucket.blob(blob_path)
+        blob.upload_from_string(
+            data=json.dumps(payload, ensure_ascii=False, indent=2),
+            content_type="application/json",
+        )
+        print(f"Uploaded to gs://{GCS_BUCKET}/{blob_path} ({len(all_results)} events)")
+    except Exception as gcs_err:
+        print(f"WARNING: failed to upload to GCS: {gcs_err}", file=sys.stderr)
 
     # Print last known credit usage info if present
     remaining_str = last_remaining if last_remaining is not None else "unknown"
