@@ -14,8 +14,6 @@ import os
 API_BASE = "https://api.the-odds-api.com/v4"
 SPORT = "americanfootball_nfl"
 GCS_BUCKET = "ai-sports-bettor"
-# Service account key path relative to this script (../ai-sports-bettor-*.json under src/)
-GCS_SA_KEY_PATH = (Path(__file__).resolve().parents[1] / "ai-sports-bettor-559e8837739f.json")
 
 
 def implied_prob_from_decimal(decimal_odds: float) -> float:
@@ -25,13 +23,14 @@ def implied_prob_from_decimal(decimal_odds: float) -> float:
 
 
 def main() -> int:
-    # Load key/value pairs directly from .env in this directory (no process env usage)
-    dotenv_path = Path(__file__).parent / "../.env"
-    config = dotenv_values(dotenv_path) if dotenv_path.exists() else {}
-
-    api_key = config.get("ODDS_API_KEY")
+    # Prefer environment variables; fall back to src/.env
+    api_key = os.getenv("ODDS_API_KEY")
     if not api_key:
-        print("ERROR: ODDS_API_KEY not set in environment", file=sys.stderr)
+        dotenv_path = Path(__file__).resolve().parents[1] / ".env"
+        config = dotenv_values(dotenv_path) if dotenv_path.exists() else {}
+        api_key = config.get("ODDS_API_KEY")
+    if not api_key:
+        print("ERROR: ODDS_API_KEY not set in environment or src/.env", file=sys.stderr)
         return 1
 
     # Load sport and markets_list from config file
@@ -138,10 +137,10 @@ def main() -> int:
             "results": all_results,
         }
 
-        # Use explicit service account credentials for GCS
-        creds = service_account.Credentials.from_service_account_file(str(GCS_SA_KEY_PATH))
-        client = storage.Client(credentials=creds, project=creds.project_id)
-        bucket = client.bucket(GCS_BUCKET)
+        # Use ADC for GCS (allow env override for bucket)
+        bucket_name = os.getenv("GCS_BUCKET", GCS_BUCKET)
+        client = storage.Client()
+        bucket = client.bucket(bucket_name)
         date_dir = dt_et.strftime("%Y-%m-%d")
         blob_name = f"player_props_events_{ts}.json"
         blob_path = f"raw/odds/{date_dir}/{blob_name}"
@@ -150,7 +149,7 @@ def main() -> int:
             data=json.dumps(payload, ensure_ascii=False, indent=2),
             content_type="application/json",
         )
-        print(f"Uploaded to gs://{GCS_BUCKET}/{blob_path} ({len(all_results)} events)")
+        print(f"Uploaded to gs://{bucket_name}/{blob_path} ({len(all_results)} events)")
     except Exception as gcs_err:
         print(f"WARNING: failed to upload to GCS: {gcs_err}", file=sys.stderr)
 

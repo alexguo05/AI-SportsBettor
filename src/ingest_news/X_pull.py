@@ -12,19 +12,22 @@ import os
 
 
 def main() -> int:
-    """Fetch recent tweets from specified accounts and save minimal fields to data/raw/news/.
+    """Fetch recent tweets from specified accounts and upload minimal fields to GCS.
 
-    - Uses Twitter API v2 recent search with a single OR-combined query
-    - Excludes retweets and replies
-    - Requests up to 100 tweets
-    - Saves text, author username, and creation time as JSONL
+    Changes versus prior behavior:
+    - Builds batches of handles within X API 512-char query limit, but executes ONLY ONE batch
+      per run to conform to a 1-request-per-minute schedule.
+    - Persists a batch cursor in GCS (JSON) to rotate which batch runs next.
+    - Continues to persist and honor since_id to avoid refetching older tweets.
     """
 
-    # Load bearer token from src/.env (prefer X_BEARER_TOKEN; fallback to BEARER_TOKEN)
-    src_dir = Path(__file__).resolve().parents[1]
-    dotenv_path = src_dir / ".env"
-    config = dotenv_values(dotenv_path) if dotenv_path.exists() else {}
-    bearer_token = config.get("X_BEARER_TOKEN") or config.get("BEARER_TOKEN")
+    # Load bearer token from environment first, then src/.env (X_BEARER_TOKEN preferred)
+    bearer_token = os.getenv("X_BEARER_TOKEN") or os.getenv("BEARER_TOKEN")
+    if not bearer_token:
+        src_dir = Path(__file__).resolve().parents[1]
+        dotenv_path = src_dir / ".env"
+        config = dotenv_values(dotenv_path) if dotenv_path.exists() else {}
+        bearer_token = config.get("X_BEARER_TOKEN") or config.get("BEARER_TOKEN")
     if not bearer_token:
         print("ERROR: X_BEARER_TOKEN (or BEARER_TOKEN) not set in src/.env", file=sys.stderr)
         return 1
@@ -56,17 +59,25 @@ def main() -> int:
     if current:
         query_strings.append(" OR ".join(current) + suffix)
 
-    # GCS setup (reuse pattern from odds script)
-    GCS_BUCKET = "ai-sports-bettor"
-    GCS_SA_KEY_PATH = (Path(__file__).resolve().parents[1] / "ai-sports-bettor-559e8837739f.json")
-    creds = service_account.Credentials.from_service_account_file(str(GCS_SA_KEY_PATH))
-    gcs_client = storage.Client(credentials=creds, project=creds.project_id)
+    # GCS setup (prefer ADC; allow env override for bucket; fallback to SA file if provided)
+    GCS_BUCKET = os.getenv("GCS_BUCKET", "ai-sports-bettor")
+    try:
+        gcs_client = storage.Client()
+    except Exception:
+        # Fallback to GOOGLE_APPLICATION_CREDENTIALS if ADC isn't available
+        sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        if sa_path and Path(sa_path).exists():
+            creds = service_account.Credentials.from_service_account_file(str(sa_path))
+            gcs_client = storage.Client(credentials=creds, project=creds.project_id)
+        else:
+            raise
     gcs_bucket = gcs_client.bucket(GCS_BUCKET)
 
     # Load checkpoint: since_id from GCS ref path
+    since_blob_name = os.getenv("X_SINCE_BLOB", "ref/x_recent_since_id.json")
     since_id: str | None = None
     try:
-        since_blob = gcs_bucket.blob("ref/x_recent_since_id.json")
+        since_blob = gcs_bucket.blob(since_blob_name)
         if since_blob.exists():
             raw = since_blob.download_as_text()
             obj = json.loads(raw) if raw else {}
@@ -88,37 +99,69 @@ def main() -> int:
     url = "https://api.twitter.com/2/tweets/search/recent"
     headers = {"Authorization": f"Bearer {bearer_token}"}
 
-    # Fetch all batches and aggregate
+    # Determine which single batch to execute this run using a rotating cursor stored in GCS
+    num_batches = len(query_strings)
+    if num_batches == 0:
+        print("No query batches constructed; check base handles list", file=sys.stderr)
+        return 0
+
+    cursor_blob_name = os.getenv("X_CURSOR_BLOB", "ref/x_query_cursor.json")
+    next_index = 0
+    try:
+        cur_blob = gcs_bucket.blob(cursor_blob_name)
+        if cur_blob.exists():
+            cur_raw = cur_blob.download_as_text()
+            cur_obj = json.loads(cur_raw) if cur_raw else {}
+            if isinstance(cur_obj.get("next_index"), int):
+                next_index = cur_obj.get("next_index", 0)
+    except Exception:
+        next_index = 0
+
+    selected_index = next_index % num_batches
+    selected_query = query_strings[selected_index]
+
+    # Advance and persist cursor for the next run (advance regardless of outcome to avoid stalls)
+    try:
+        new_obj = {
+            "next_index": (selected_index + 1) % num_batches,
+            "num_batches": num_batches,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        gcs_bucket.blob(cursor_blob_name).upload_from_string(
+            json.dumps(new_obj), content_type="application/json"
+        )
+    except Exception:
+        pass
+
+    # Execute only the selected batch
     id_to_username = {}
     all_tweets: list[dict] = []
-    for q in query_strings:
-        params = {"query": q, **common_params}
-        try:
-            resp = requests.get(url, params=params, headers=headers, timeout=20)
-            resp.raise_for_status()
-        except requests.HTTPError as e:
-            print(f"ERROR: HTTP error: {e}", file=sys.stderr)
-            try:
-                print(resp.text, file=sys.stderr)
-            except Exception:
-                pass
-            continue
-        except Exception as e:
-            print(f"ERROR: request failed: {e}", file=sys.stderr)
-            continue
-
+    params = {"query": selected_query, **common_params}
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=20)
+        resp.raise_for_status()
         payload = resp.json()
+    except requests.HTTPError as e:
+        print(f"ERROR: HTTP error: {e}", file=sys.stderr)
+        try:
+            print(resp.text, file=sys.stderr)
+        except Exception:
+            pass
+        payload = {}
+    except Exception as e:
+        print(f"ERROR: request failed: {e}", file=sys.stderr)
+        payload = {}
 
-        includes = payload.get("includes", {})
-        for u in includes.get("users", []) or []:
-            uid = u.get("id")
-            uname = u.get("username")
-            if uid and uname:
-                id_to_username[uid] = uname
+    includes = payload.get("includes", {}) if isinstance(payload, dict) else {}
+    for u in includes.get("users", []) or []:
+        uid = u.get("id")
+        uname = u.get("username")
+        if uid and uname:
+            id_to_username[uid] = uname
 
-        batch_tweets = payload.get("data", []) or []
-        if batch_tweets:
-            all_tweets.extend(batch_tweets)
+    batch_tweets = payload.get("data", []) if isinstance(payload, dict) else []
+    if batch_tweets:
+        all_tweets.extend(batch_tweets or [])
 
     # Prepare upload path in GCS under raw/X_news/YYYY-MM-DD/ using Eastern Time
     now_utc = datetime.now(timezone.utc)
@@ -169,7 +212,7 @@ def main() -> int:
             max_id = max(tweet_ids, key=lambda s: int(s))
             prev = int(since_id) if since_id and since_id.isdigit() else 0
             if int(max_id) > prev:
-                since_blob = gcs_bucket.blob("ref/x_recent_since_id.json")
+                since_blob = gcs_bucket.blob(since_blob_name)
                 since_blob.upload_from_string(json.dumps({"since_id": max_id}), content_type="application/json")
     except Exception:
         pass
