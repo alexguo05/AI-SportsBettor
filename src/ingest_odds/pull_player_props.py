@@ -7,6 +7,8 @@ import httpx
 from dotenv import dotenv_values
 from google.cloud import storage
 from google.oauth2 import service_account
+from zoneinfo import ZoneInfo
+import os
 
 
 API_BASE = "https://api.the-odds-api.com/v4"
@@ -32,38 +34,29 @@ def main() -> int:
         print("ERROR: ODDS_API_KEY not set in environment", file=sys.stderr)
         return 1
 
-    # HARD-CODED player prop markets (based on provider keys)
-    markets_list = [
-        "player_receptions",
-        "player_reception_yds",
-        "player_reception_longest",
-        "player_rush_yds",
-        "player_rush_attempts",
-        "player_rush_longest",
-        "player_rush_reception_yds",
-        "player_pass_attempts",
-        "player_pass_completions",
-        "player_pass_yds",
-        "player_pass_rush_yds",
-        "player_pass_tds",
-        "player_pass_interceptions",
-        "player_pass_longest_completion",
-        "player_anytime_td",
-        "player_1st_td",
-        "player_tackles_assists",
-        "player_solo_tackles",
-        "player_field_goals",
-        "player_kicking_points",
-    ]
+    # Load sport and markets_list from config file
+    config_path = Path(__file__).resolve().parents[1] / "config" / "config.json"
+    try:
+        with config_path.open("r", encoding="utf-8") as cf:
+            app_cfg = json.load(cf)
+        sport = app_cfg.get("sport", "americanfootball_nfl")
+        markets_list = app_cfg.get("markets_list", [])
+        if not markets_list:
+            print("ERROR: markets_list missing in config", file=sys.stderr)
+            return 1
+    except Exception as e:
+        print(f"ERROR: failed to load config: {e}", file=sys.stderr)
+        return 1
     markets = ",".join(markets_list)
 
     dt_utc = datetime.now(timezone.utc)
-    ts = dt_utc.strftime("%Y%m%dT%H%M%SZ")
+    dt_et = dt_utc.astimezone(ZoneInfo("America/New_York"))
+    ts = dt_et.strftime("%Y%m%dT%H%M%S%z")  # ET timestamp with offset
 
     try:
         with httpx.Client(timeout=30) as client:
             # 1) Fetch upcoming events (no odds, no credit cost per provider docs)
-            events_url = f"{API_BASE}/sports/{SPORT}/events"
+            events_url = f"{API_BASE}/sports/{sport}/events"
             ev_resp = client.get(events_url, params={"apiKey": api_key, "dateFormat": "iso"})
             ev_resp.raise_for_status()
             events = ev_resp.json()
@@ -90,7 +83,7 @@ def main() -> int:
                 event_id = ev.get("id")
                 if not event_id:
                     continue
-                odds_url = f"{API_BASE}/sports/{SPORT}/events/{event_id}/odds"
+                odds_url = f"{API_BASE}/sports/{sport}/events/{event_id}/odds"
                 params = {
                     "apiKey": api_key,
                     "regions": "us",
@@ -137,7 +130,8 @@ def main() -> int:
     try:
         payload = {
             "fetched_at": dt_utc.isoformat(),
-            "sport": SPORT,
+            "fetched_at_et": dt_et.isoformat(),
+            "sport": sport,
             "regions": ["us"],
             "markets": markets_list,
             "events_count": len(all_results),
@@ -148,8 +142,9 @@ def main() -> int:
         creds = service_account.Credentials.from_service_account_file(str(GCS_SA_KEY_PATH))
         client = storage.Client(credentials=creds, project=creds.project_id)
         bucket = client.bucket(GCS_BUCKET)
+        date_dir = dt_et.strftime("%Y-%m-%d")
         blob_name = f"player_props_events_{ts}.json"
-        blob_path = f"raw/odds/{blob_name}"
+        blob_path = f"raw/odds/{date_dir}/{blob_name}"
         blob = bucket.blob(blob_path)
         blob.upload_from_string(
             data=json.dumps(payload, ensure_ascii=False, indent=2),
