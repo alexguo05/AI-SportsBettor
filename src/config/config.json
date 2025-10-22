@@ -1,10 +1,41 @@
 {
   "x_base_handles": [
-    "NFLCharean",
     "AdamSchefter",
-    "LauraRutledge"
+    "RapSheet",
+    "Cardschatter",
+    "marcraimondi",
+    "jeffzrebiec",
+    "JoeBuscaglia",
+    "josephperson",
+    "danweirderer",
+    "pauldehnerjr",
+    "AkronJackson",
+    "calvinwatkins",
+    "christomasson",
+    "davebirkett",
+    "RobDemovsky",
+    "jonmalexander",
+    "HolderStephen",
+    "_John_Shipley",
+    "KCChiefs_Matt",
+    "VinnyBonsignore",
+    "danielrpopper",
+    "LATimesklein",
+    "DavidFurones_",
+    "BenGoessling",
+    "DougKyed",
+    "ByLukeJohnson",
+    "JordanRaanan",
+    "RichCimini",
+    "ZBerm",
+    "FarabaughFB",
+    "Eric_Branch",
+    "MikeDugar",
+    "NFLSTROUD",
+    "terrymc13",
+    "BenStandig"
   ],
-  "tweet_max_results": 100,
+  "tweet_max_results": 30,
   "sport": "americanfootball_nfl",
   "markets_list": [
     "player_receptions",
@@ -29,4 +60,3 @@
     "player_kicking_points"
   ]
 }
-

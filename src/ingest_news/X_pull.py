@@ -2,6 +2,8 @@ import sys
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
+import tempfile
 
 import requests
 from dotenv import dotenv_values
@@ -42,10 +44,18 @@ def main() -> int:
     except Exception:
         base_handles = ["NFLCharean", "AdamSchefter", "LauraRutledge"]
         tweet_max_results = 100
+
+    # Local dev convenience: if GOOGLE_APPLICATION_CREDENTIALS isn't set, default to repo SA JSON
+    # This allows running locally with a file while Cloud Run uses attached service account via ADC.
+    if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        default_sa_path = Path(__file__).resolve().parents[1] / "ai-sports-bettor-559e8837739f.json"
+        if default_sa_path.exists():
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(default_sa_path)
     # Build one or more queries within X API 512-char limit, maximizing handles per query
     suffix = " -is:retweet -is:reply"
     clauses = [f"from:{h}" for h in base_handles]
     query_strings: list[str] = []
+    batch_handles: list[list[str]] = []
     current: list[str] = []
     for clause in clauses:
         tentative = (" OR ".join(current + [clause]) + suffix) if current else (clause + suffix)
@@ -54,10 +64,12 @@ def main() -> int:
         else:
             if current:
                 query_strings.append(" OR ".join(current) + suffix)
+                batch_handles.append([c.split(":", 1)[1] if ":" in c else c for c in current])
             # Start new batch with this clause
             current = [clause]
     if current:
         query_strings.append(" OR ".join(current) + suffix)
+        batch_handles.append([c.split(":", 1)[1] if ":" in c else c for c in current])
 
     # GCS setup (prefer ADC; allow env override for bucket; fallback to SA file if provided)
     GCS_BUCKET = os.getenv("GCS_BUCKET", "ai-sports-bettor")
@@ -70,7 +82,8 @@ def main() -> int:
             creds = service_account.Credentials.from_service_account_file(str(sa_path))
             gcs_client = storage.Client(credentials=creds, project=creds.project_id)
         else:
-            raise
+            print("ERROR: GOOGLE_APPLICATION_CREDENTIALS not set in environment or src/.env", file=sys.stderr)
+            raise 
     gcs_bucket = gcs_client.bucket(GCS_BUCKET)
 
     # Load checkpoint: since_id from GCS ref path
@@ -89,9 +102,10 @@ def main() -> int:
     # Prepare common params (query will be set per batch)
     common_params = {
         "max_results": str(tweet_max_results),
-        "tweet.fields": "created_at,author_id",
-        "expansions": "author_id",
+        "tweet.fields": "created_at,author_id,attachments",
+        "expansions": "author_id,attachments.media_keys",
         "user.fields": "username",
+        "media.fields": "media_key,type,url,preview_image_url,width,height,alt_text,variants,duration_ms",
     }
     if since_id:
         common_params["since_id"] = since_id
@@ -119,6 +133,11 @@ def main() -> int:
 
     selected_index = next_index % num_batches
     selected_query = query_strings[selected_index]
+    try:
+        selected_handles = batch_handles[selected_index] if selected_index < len(batch_handles) else []
+        print(f"Selected batch {selected_index + 1}/{num_batches} handles: {', '.join(selected_handles)}")
+    except Exception:
+        pass
 
     # Advance and persist cursor for the next run (advance regardless of outcome to avoid stalls)
     try:
@@ -159,6 +178,13 @@ def main() -> int:
         if uid and uname:
             id_to_username[uid] = uname
 
+    # Map media_key -> media object for quick lookup
+    media_key_to_media: dict[str, dict] = {}
+    for m in includes.get("media", []) or []:
+        mk = m.get("media_key")
+        if mk:
+            media_key_to_media[mk] = m
+
     batch_tweets = payload.get("data", []) if isinstance(payload, dict) else []
     if batch_tweets:
         all_tweets.extend(batch_tweets or [])
@@ -190,6 +216,80 @@ def main() -> int:
                 except Exception:
                     created_at_et = None
 
+                # Collect media URLs if present (photo: url; video/GIF: pick highest bitrate MP4 variant)
+                media_urls: list[str] = []
+                media_gcs_paths: list[str] = []
+                tweet_id = t.get("id") or ""
+                attachments = t.get("attachments") or {}
+                # Track per-tweet filenames to avoid duplicates
+                used_names: set[str] = set()
+                for mk in attachments.get("media_keys", []) or []:
+                    m = media_key_to_media.get(mk)
+                    if not m:
+                        continue
+                    download_url = None
+                    mtype = m.get("type")
+                    if mtype == "photo":
+                        download_url = m.get("url")
+                    elif mtype in ("video", "animated_gif"):
+                        variants = m.get("variants", []) or []
+                        mp4s = [v for v in variants if v.get("content_type") == "video/mp4"]
+                        if mp4s:
+                            best = max(mp4s, key=lambda v: v.get("bit_rate", 0))
+                            download_url = best.get("url")
+                        # Fallback to preview image if no MP4
+                        if not download_url:
+                            download_url = m.get("preview_image_url")
+                    else:
+                        download_url = m.get("url") or m.get("preview_image_url")
+
+                    if not download_url:
+                        continue
+
+                    media_urls.append(download_url)
+
+                    # Derive original filename from URL (without query). If empty, fallback to generic.
+                    try:
+                        parsed = urlparse(download_url)
+                        original_name = Path(parsed.path).name or "media"
+                    except Exception:
+                        original_name = "media"
+
+                    # Ensure filename uniqueness per tweet
+                    base_name = original_name
+                    name_candidate = base_name
+                    suffix = 1
+                    while name_candidate in used_names:
+                        parts = base_name.rsplit(".", 1)
+                        if len(parts) == 2:
+                            name_candidate = f"{parts[0]}_{suffix}.{parts[1]}"
+                        else:
+                            name_candidate = f"{base_name}_{suffix}"
+                        suffix += 1
+                    used_names.add(name_candidate)
+
+                    # Compose GCS path: include tweet id and preserve original filename
+                    media_blob_path = f"raw/X_news/{date_dir}/media/{tweet_id}_{name_candidate}" if tweet_id else f"raw/X_news/{date_dir}/media/{name_candidate}"
+
+                    # Download and upload to GCS (use temp file to avoid seek issues on stream)
+                    try:
+                        dresp = requests.get(download_url, stream=True, timeout=60)
+                        dresp.raise_for_status()
+                        content_type = dresp.headers.get("Content-Type")
+                        with tempfile.NamedTemporaryFile(prefix="x_media_", suffix=".bin", delete=True) as tmp:
+                            for chunk in dresp.iter_content(chunk_size=1024 * 1024):
+                                if not chunk:
+                                    continue
+                                tmp.write(chunk)
+                            tmp.flush()
+                            tmp.seek(0)
+                            media_blob = gcs_bucket.blob(media_blob_path)
+                            media_blob.upload_from_file(tmp, content_type=content_type)
+                        media_gcs_paths.append(f"gs://{GCS_BUCKET}/{media_blob_path}")
+                        print(f"Uploaded media for tweet {tweet_id} to gs://{GCS_BUCKET}/{media_blob_path}")
+                    except Exception as media_err:
+                        print(f"WARNING: failed to upload media for tweet {tweet_id} from {download_url}: {media_err}", file=sys.stderr)
+
                 record = {
                     "id": t.get("id"),
                     "text": t.get("text"),
@@ -197,6 +297,8 @@ def main() -> int:
                     "created_at": created_at_raw,
                     "created_at_et": created_at_et,
                     "pulled_at_et": now_et.isoformat(),
+                    "media_urls": media_urls,
+                    "media_gcs_paths": media_gcs_paths,
                 }
                 lines.append(json.dumps(record, ensure_ascii=False))
             blob = gcs_bucket.blob(gcs_blob_path)
