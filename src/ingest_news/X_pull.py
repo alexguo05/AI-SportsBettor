@@ -86,20 +86,11 @@ def main() -> int:
             raise 
     gcs_bucket = gcs_client.bucket(GCS_BUCKET)
 
-    # Load checkpoint: since_id from GCS ref path
-    since_blob_name = os.getenv("X_SINCE_BLOB", "ref/x_recent_since_id.json")
+    # Global checkpoint will be stored inside the cursor file (global_since_id)
     since_id: str | None = None
-    try:
-        since_blob = gcs_bucket.blob(since_blob_name)
-        if since_blob.exists():
-            raw = since_blob.download_as_text()
-            obj = json.loads(raw) if raw else {}
-            since_id = obj.get("since_id")
-    except Exception:
-        since_id = None
 
     # Request parameters: up to 100 results, include created_at and author info
-    # Prepare common params (query will be set per batch)
+    # Prepare common params (query will be set per batch); since_id will be set later from cycle state
     common_params = {
         "max_results": str(tweet_max_results),
         "tweet.fields": "created_at,author_id,attachments",
@@ -107,8 +98,6 @@ def main() -> int:
         "user.fields": "username",
         "media.fields": "media_key,type,url,preview_image_url,width,height,alt_text,variants,duration_ms",
     }
-    if since_id:
-        common_params["since_id"] = since_id
 
     url = "https://api.twitter.com/2/tweets/search/recent"
     headers = {"Authorization": f"Bearer {bearer_token}"}
@@ -121,6 +110,9 @@ def main() -> int:
 
     cursor_blob_name = os.getenv("X_CURSOR_BLOB", "ref/x_query_cursor.json")
     next_index = 0
+    cycle_since_id: str | None = None  # frozen baseline for the cycle
+    cycle_max_seen_id: str | None = None  # running max within the cycle
+    prev_num_batches: int | None = None
     try:
         cur_blob = gcs_bucket.blob(cursor_blob_name)
         if cur_blob.exists():
@@ -128,6 +120,10 @@ def main() -> int:
             cur_obj = json.loads(cur_raw) if cur_raw else {}
             if isinstance(cur_obj.get("next_index"), int):
                 next_index = cur_obj.get("next_index", 0)
+            cycle_since_id = cur_obj.get("cycle_since_id")
+            cycle_max_seen_id = cur_obj.get("cycle_max_seen_id")
+            if isinstance(cur_obj.get("num_batches"), int):
+                prev_num_batches = cur_obj.get("num_batches")
     except Exception:
         next_index = 0
 
@@ -139,12 +135,24 @@ def main() -> int:
     except Exception:
         pass
 
+    # Determine cycle boundaries and freeze cycle since_id at the start of a cycle
+    is_new_cycle = (
+        cycle_since_id is None
+        or (prev_num_batches is not None and prev_num_batches != num_batches)
+        or selected_index == 0
+    )
+    if is_new_cycle:
+        # Start a new cycle: keep the frozen baseline as-is and reset running max to that baseline
+        cycle_max_seen_id = cycle_since_id
+
     # Advance and persist cursor for the next run (advance regardless of outcome to avoid stalls)
     try:
         new_obj = {
             "next_index": (selected_index + 1) % num_batches,
             "num_batches": num_batches,
             "updated_at": datetime.now(timezone.utc).isoformat(),
+            "cycle_since_id": cycle_since_id,
+            "cycle_max_seen_id": cycle_max_seen_id,
         }
         gcs_bucket.blob(cursor_blob_name).upload_from_string(
             json.dumps(new_obj), content_type="application/json"
@@ -156,6 +164,8 @@ def main() -> int:
     id_to_username = {}
     all_tweets: list[dict] = []
     params = {"query": selected_query, **common_params}
+    if cycle_since_id:
+        params["since_id"] = cycle_since_id
     try:
         resp = requests.get(url, params=params, headers=headers, timeout=20)
         resp.raise_for_status()
@@ -307,15 +317,58 @@ def main() -> int:
     except Exception as write_err:
         print(f"WARNING: failed to upload tweets to GCS: {write_err}", file=sys.stderr)
 
-    # Update checkpoint with the highest tweet ID seen (write to GCS ref path)
+    # Update cycle state with the highest tweet ID seen this run; only update global checkpoint at end of cycle
     try:
         tweet_ids = [t.get("id") for t in tweets if t.get("id")]
+        run_max_id: str | None = None
         if tweet_ids:
-            max_id = max(tweet_ids, key=lambda s: int(s))
-            prev = int(since_id) if since_id and since_id.isdigit() else 0
-            if int(max_id) > prev:
-                since_blob = gcs_bucket.blob(since_blob_name)
-                since_blob.upload_from_string(json.dumps({"since_id": max_id}), content_type="application/json")
+            run_max_id = max(tweet_ids, key=lambda s: int(s))
+        # Update cycle_max_seen_id
+        if run_max_id:
+            try:
+                cur_max = int(cycle_max_seen_id) if cycle_max_seen_id and str(cycle_max_seen_id).isdigit() else 0
+                new_max = int(run_max_id)
+                if new_max > cur_max:
+                    cycle_max_seen_id = run_max_id
+            except Exception:
+                cycle_max_seen_id = run_max_id
+
+        # Determine if this is the last batch of the cycle
+        is_last_batch = (selected_index == num_batches - 1)
+
+        # Persist updated cycle fields back to cursor
+        try:
+            cur_state = {
+                "next_index": (selected_index + 1) % num_batches,
+                "num_batches": num_batches,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "cycle_since_id": cycle_since_id,
+                "cycle_max_seen_id": cycle_max_seen_id,
+            }
+            gcs_bucket.blob(cursor_blob_name).upload_from_string(
+                json.dumps(cur_state), content_type="application/json"
+            )
+        except Exception:
+            pass
+
+        # At end of cycle, advance global since_id to the max seen and reset cycle fields
+        if is_last_batch and cycle_max_seen_id is not None:
+            # End of cycle: advance frozen baseline to running max and clear running max
+            cycle_since_id = cycle_max_seen_id
+            cycle_max_seen_id = None
+            try:
+                reset_state = {
+                    "next_index": (selected_index + 1) % num_batches,
+                    "num_batches": num_batches,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "cycle_since_id": cycle_since_id,
+                    "cycle_max_seen_id": cycle_max_seen_id,
+                }
+                gcs_bucket.blob(cursor_blob_name).upload_from_string(
+                    json.dumps(reset_state), content_type="application/json"
+                )
+            except Exception:
+                pass
     except Exception:
         pass
 
