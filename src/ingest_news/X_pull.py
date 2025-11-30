@@ -4,58 +4,82 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 import tempfile
+import time
+import os
 
 import requests
 from dotenv import dotenv_values
 from google.cloud import storage
 from google.oauth2 import service_account
 from zoneinfo import ZoneInfo
-import os
 
 
 def main() -> int:
-    """Fetch recent tweets from specified accounts and upload minimal fields to GCS.
+    """Fetch recent tweets continuously from specified accounts and upload to GCS.
 
-    Changes versus prior behavior:
-    - Builds batches of handles within X API 512-char query limit, but executes ONLY ONE batch
-      per run to conform to a 1-request-per-minute schedule.
-    - Persists a batch cursor in GCS (JSON) to rotate which batch runs next.
-    - Continues to persist and honor since_id to avoid refetching older tweets.
+    - Builds batches of handles within X API 512-char query limit.
+    - Runs an infinite loop, executing ONE batch per interval to respect rate limits.
+    - Accumulates tweets in-memory for the full cycle of batches.
+    - Uploads ONE consolidated JSONL file at the end of each cycle.
+    - Persists global since_id to GCS only at the end of each full cycle.
     """
 
-    # Load bearer token from environment first, then src/.env (X_BEARER_TOKEN preferred)
-    bearer_token = os.getenv("X_BEARER_TOKEN") or os.getenv("BEARER_TOKEN")
-    if not bearer_token:
-        src_dir = Path(__file__).resolve().parents[1]
-        dotenv_path = src_dir / ".env"
-        config = dotenv_values(dotenv_path) if dotenv_path.exists() else {}
-        bearer_token = config.get("X_BEARER_TOKEN") or config.get("BEARER_TOKEN")
-    if not bearer_token:
-        print("ERROR: X_BEARER_TOKEN (or BEARER_TOKEN) not set in src/.env", file=sys.stderr)
-        return 1
-
-    # Load config for base handles
+    # 1. Load configuration from config.json
     config_path = Path(__file__).resolve().parents[1] / "config" / "config.json"
     try:
         with config_path.open("r", encoding="utf-8") as cf:
             app_cfg = json.load(cf)
-        base_handles = app_cfg.get("x_base_handles", ["NFLCharean", "AdamSchefter", "LauraRutledge"])
-        tweet_max_results = int(app_cfg.get("tweet_max_results", 100))
-    except Exception:
-        base_handles = ["NFLCharean", "AdamSchefter", "LauraRutledge"]
-        tweet_max_results = 100
+    except Exception as e:
+        print(f"ERROR: failed to load config.json: {e}", file=sys.stderr)
+        return 1
 
-    # Local dev convenience: if GOOGLE_APPLICATION_CREDENTIALS isn't set, default to repo SA JSON
-    # This allows running locally with a file while Cloud Run uses attached service account via ADC.
+    base_handles = app_cfg.get("x_base_handles", [])
+    tweet_max_results = int(app_cfg.get("tweet_max_results", 100))
+    poll_interval_sec = int(app_cfg.get("x_poll_interval_sec", 30))
+    gcs_bucket_name = app_cfg.get("gcs_bucket", "ai-sports-bettor")
+
+    if not base_handles:
+        print("ERROR: x_base_handles missing in config.json", file=sys.stderr)
+        return 1
+
+    # 2. Load secrets from src/.env (X_BEARER_TOKEN)
+    src_dir = Path(__file__).resolve().parents[1]
+    dotenv_path = src_dir / ".env"
+    env_vars = dotenv_values(dotenv_path) if dotenv_path.exists() else {}
+    bearer_token = env_vars.get("X_BEARER_TOKEN") or env_vars.get("BEARER_TOKEN") or os.getenv("X_BEARER_TOKEN")
+
+    if not bearer_token:
+        print("ERROR: X_BEARER_TOKEN not set in src/.env", file=sys.stderr)
+        return 1
+
+    # 3. GCS setup using Service Account from src/
+    # Local dev convenience: default to repo SA JSON if GOOGLE_APPLICATION_CREDENTIALS not set
     if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-        default_sa_path = Path(__file__).resolve().parents[1] / "ai-sports-bettor-559e8837739f.json"
+        default_sa_path = src_dir / "ai-sports-bettor-559e8837739f.json"
         if default_sa_path.exists():
+            # Set it for Google libraries to pick up automatically if needed
+            # But we also load explicitly below for clarity
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(default_sa_path)
-    # Build one or more queries within X API 512-char limit, maximizing handles per query
+
+    try:
+        # Prefer loading explicit credentials if the file exists in src/
+        sa_path = src_dir / "ai-sports-bettor-559e8837739f.json"
+        if sa_path.exists():
+            creds = service_account.Credentials.from_service_account_file(str(sa_path))
+            gcs_client = storage.Client(credentials=creds, project=creds.project_id)
+        else:
+            # Fallback to ADC
+            gcs_client = storage.Client()
+    except Exception as e:
+        print(f"ERROR: Failed to initialize GCS client: {e}", file=sys.stderr)
+        return 1
+
+    gcs_bucket = gcs_client.bucket(gcs_bucket_name)
+
+    # 4. Build query batches
     suffix = " -is:retweet -is:reply"
     clauses = [f"from:{h}" for h in base_handles]
     query_strings: list[str] = []
-    batch_handles: list[list[str]] = []
     current: list[str] = []
     for clause in clauses:
         tentative = (" OR ".join(current + [clause]) + suffix) if current else (clause + suffix)
@@ -64,33 +88,10 @@ def main() -> int:
         else:
             if current:
                 query_strings.append(" OR ".join(current) + suffix)
-                batch_handles.append([c.split(":", 1)[1] if ":" in c else c for c in current])
-            # Start new batch with this clause
             current = [clause]
     if current:
         query_strings.append(" OR ".join(current) + suffix)
-        batch_handles.append([c.split(":", 1)[1] if ":" in c else c for c in current])
 
-    # GCS setup (prefer ADC; allow env override for bucket; fallback to SA file if provided)
-    GCS_BUCKET = os.getenv("GCS_BUCKET", "ai-sports-bettor")
-    try:
-        gcs_client = storage.Client()
-    except Exception:
-        # Fallback to GOOGLE_APPLICATION_CREDENTIALS if ADC isn't available
-        sa_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-        if sa_path and Path(sa_path).exists():
-            creds = service_account.Credentials.from_service_account_file(str(sa_path))
-            gcs_client = storage.Client(credentials=creds, project=creds.project_id)
-        else:
-            print("ERROR: GOOGLE_APPLICATION_CREDENTIALS not set in environment or src/.env", file=sys.stderr)
-            raise 
-    gcs_bucket = gcs_client.bucket(GCS_BUCKET)
-
-    # Global checkpoint will be stored inside the cursor file (global_since_id)
-    since_id: str | None = None
-
-    # Request parameters: up to 100 results, include created_at and author info
-    # Prepare common params (query will be set per batch); since_id will be set later from cycle state
     common_params = {
         "max_results": str(tweet_max_results),
         "tweet.fields": "created_at,author_id,attachments",
@@ -102,137 +103,116 @@ def main() -> int:
     url = "https://api.twitter.com/2/tweets/search/recent"
     headers = {"Authorization": f"Bearer {bearer_token}"}
 
-    # Determine which single batch to execute this run using a rotating cursor stored in GCS
-    num_batches = len(query_strings)
-    if num_batches == 0:
-        print("No query batches constructed; check base handles list", file=sys.stderr)
-        return 0
-
-    cursor_blob_name = os.getenv("X_CURSOR_BLOB", "ref/x_query_cursor.json")
+    # In-memory cycle state
     next_index = 0
-    cycle_since_id: str | None = None  # frozen baseline for the cycle
-    cycle_max_seen_id: str | None = None  # running max within the cycle
-    prev_num_batches: int | None = None
+    cycle_since_id: str | None = None      # The baseline ID used for queries in the current cycle
+    cycle_max_seen_id: str | None = None   # The highest ID seen so far during the current cycle
+    cycle_tweets: list[str] = []           # JSONL lines accumulated for the current cycle
+
+    # Load initial since_id from GCS
     try:
-        cur_blob = gcs_bucket.blob(cursor_blob_name)
-        if cur_blob.exists():
-            cur_raw = cur_blob.download_as_text()
-            cur_obj = json.loads(cur_raw) if cur_raw else {}
-            if isinstance(cur_obj.get("next_index"), int):
-                next_index = cur_obj.get("next_index", 0)
-            cycle_since_id = cur_obj.get("cycle_since_id")
-            cycle_max_seen_id = cur_obj.get("cycle_max_seen_id")
-            if isinstance(cur_obj.get("num_batches"), int):
-                prev_num_batches = cur_obj.get("num_batches")
+        since_blob = gcs_bucket.blob("ref/x_recent_since_id.json")
+        if since_blob.exists():
+            raw = since_blob.download_as_text()
+            obj = json.loads(raw) if raw else {}
+            cycle_since_id = obj.get("since_id")
     except Exception:
-        next_index = 0
+        cycle_since_id = None
 
-    selected_index = next_index % num_batches
-    selected_query = query_strings[selected_index]
-    try:
-        selected_handles = batch_handles[selected_index] if selected_index < len(batch_handles) else []
-        print(f"Selected batch {selected_index + 1}/{num_batches} handles: {', '.join(selected_handles)}")
-    except Exception:
-        pass
+    print(f"Starting continuous poll. Batches: {len(query_strings)}. Interval: {poll_interval_sec}s. Bucket: {gcs_bucket_name}")
 
-    # Determine cycle boundaries and freeze cycle since_id at the start of a cycle
-    is_new_cycle = (
-        cycle_since_id is None
-        or (prev_num_batches is not None and prev_num_batches != num_batches)
-        or selected_index == 0
-    )
-    if is_new_cycle:
-        # Start a new cycle: keep the frozen baseline as-is and reset running max to that baseline
-        cycle_max_seen_id = cycle_since_id
+    while True:
+        num_batches = len(query_strings)
+        if num_batches == 0:
+            print("No queries constructed. Sleeping...", file=sys.stderr)
+            time.sleep(poll_interval_sec)
+            continue
 
-    # Advance and persist cursor for the next run (advance regardless of outcome to avoid stalls)
-    try:
-        new_obj = {
-            "next_index": (selected_index + 1) % num_batches,
-            "num_batches": num_batches,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-            "cycle_since_id": cycle_since_id,
-            "cycle_max_seen_id": cycle_max_seen_id,
-        }
-        gcs_bucket.blob(cursor_blob_name).upload_from_string(
-            json.dumps(new_obj), content_type="application/json"
-        )
-    except Exception:
-        pass
+        selected_index = next_index % num_batches
+        
+        # Start of a new cycle: freeze the baseline since_id for this pass and clear buffer
+        if selected_index == 0:
+            if cycle_max_seen_id is not None:
+                # Use the max seen from the previous cycle as the new baseline
+                cycle_since_id = cycle_max_seen_id
+            
+            # Reset running max and buffer for the new cycle
+            cycle_max_seen_id = cycle_since_id
+            cycle_tweets = []
 
-    # Execute only the selected batch
-    id_to_username = {}
-    all_tweets: list[dict] = []
-    params = {"query": selected_query, **common_params}
-    if cycle_since_id:
-        params["since_id"] = cycle_since_id
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=20)
-        resp.raise_for_status()
-        payload = resp.json()
-    except requests.HTTPError as e:
-        print(f"ERROR: HTTP error: {e}", file=sys.stderr)
+        selected_query = query_strings[selected_index]
+
+        # Prepare request
+        params = {"query": selected_query, **common_params}
+        if cycle_since_id:
+            params["since_id"] = cycle_since_id
+
+        payload = {}
         try:
-            print(resp.text, file=sys.stderr)
-        except Exception:
-            pass
-        payload = {}
-    except Exception as e:
-        print(f"ERROR: request failed: {e}", file=sys.stderr)
-        payload = {}
+            resp = requests.get(url, params=params, headers=headers, timeout=20)
+            resp.raise_for_status()
+            payload = resp.json()
+        except requests.HTTPError as e:
+            print(f"ERROR: HTTP error: {e}", file=sys.stderr)
+            try:
+                print(resp.text, file=sys.stderr)
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"ERROR: request failed: {e}", file=sys.stderr)
 
-    includes = payload.get("includes", {}) if isinstance(payload, dict) else {}
-    for u in includes.get("users", []) or []:
-        uid = u.get("id")
-        uname = u.get("username")
-        if uid and uname:
-            id_to_username[uid] = uname
+        # Process results
+        includes = payload.get("includes", {}) if isinstance(payload, dict) else {}
+        id_to_username = {}
+        for u in includes.get("users", []) or []:
+            uid = u.get("id")
+            uname = u.get("username")
+            if uid and uname:
+                id_to_username[uid] = uname
 
-    # Map media_key -> media object for quick lookup
-    media_key_to_media: dict[str, dict] = {}
-    for m in includes.get("media", []) or []:
-        mk = m.get("media_key")
-        if mk:
-            media_key_to_media[mk] = m
+        media_key_to_media = {}
+        for m in includes.get("media", []) or []:
+            mk = m.get("media_key")
+            if mk:
+                media_key_to_media[mk] = m
 
-    batch_tweets = payload.get("data", []) if isinstance(payload, dict) else []
-    if batch_tweets:
-        all_tweets.extend(batch_tweets or [])
+        tweets = payload.get("data", []) if isinstance(payload, dict) else []
+        
+        # Process retrieved tweets and add to cycle buffer
+        if tweets:
+            now_utc = datetime.now(timezone.utc)
+            now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+            date_dir = now_et.strftime("%Y-%m-%d")
 
-    # Prepare upload path in GCS under raw/X_news/YYYY-MM-DD/ using Eastern Time
-    now_utc = datetime.now(timezone.utc)
-    now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
-    date_dir = now_et.strftime("%Y-%m-%d")
-    ts = now_et.strftime("%Y%m%dT%H%M%S%z")  # ET timestamp with offset
-    gcs_blob_path = f"raw/X_news/{date_dir}/tweets_recent_{ts}.jsonl"
-
-    # Write minimal fields for each tweet to JSONL (upload to GCS if non-empty)
-    tweets = all_tweets
-    try:
-        if not tweets:
-            print("No new tweets; skipping upload")
-        else:
-            lines: list[str] = []
             for t in tweets:
+                # Update running max ID
+                tid = t.get("id")
+                if tid:
+                    try:
+                        curr = int(cycle_max_seen_id) if cycle_max_seen_id and str(cycle_max_seen_id).isdigit() else 0
+                        new_id = int(tid)
+                        if new_id > curr:
+                            cycle_max_seen_id = tid
+                    except Exception:
+                        cycle_max_seen_id = tid
+
+                # Build record
                 author_id = t.get("author_id")
-                # Convert tweet created_at (UTC) to ET for standardized output
                 created_at_raw = t.get("created_at")
                 created_at_et = None
                 try:
                     if created_at_raw:
-                        # Handle trailing 'Z'
                         created_dt_utc = datetime.fromisoformat(created_at_raw.replace("Z", "+00:00"))
                         created_at_et = created_dt_utc.astimezone(ZoneInfo("America/New_York")).isoformat()
                 except Exception:
                     created_at_et = None
 
-                # Collect media URLs if present (photo: url; video/GIF: pick highest bitrate MP4 variant)
-                media_urls: list[str] = []
-                media_gcs_paths: list[str] = []
-                tweet_id = t.get("id") or ""
+                # Media handling
+                media_urls = []
+                media_gcs_paths = []
                 attachments = t.get("attachments") or {}
-                # Track per-tweet filenames to avoid duplicates
-                used_names: set[str] = set()
+                used_names = set()
+                
                 for mk in attachments.get("media_keys", []) or []:
                     m = media_key_to_media.get(mk)
                     if not m:
@@ -247,7 +227,6 @@ def main() -> int:
                         if mp4s:
                             best = max(mp4s, key=lambda v: v.get("bit_rate", 0))
                             download_url = best.get("url")
-                        # Fallback to preview image if no MP4
                         if not download_url:
                             download_url = m.get("preview_image_url")
                     else:
@@ -255,53 +234,50 @@ def main() -> int:
 
                     if not download_url:
                         continue
-
+                    
                     media_urls.append(download_url)
-
-                    # Derive original filename from URL (without query). If empty, fallback to generic.
+                    
+                    # Media upload (happens immediately)
                     try:
                         parsed = urlparse(download_url)
                         original_name = Path(parsed.path).name or "media"
                     except Exception:
                         original_name = "media"
-
-                    # Ensure filename uniqueness per tweet
+                    
                     base_name = original_name
                     name_candidate = base_name
-                    suffix = 1
+                    suffix_count = 1
                     while name_candidate in used_names:
                         parts = base_name.rsplit(".", 1)
                         if len(parts) == 2:
-                            name_candidate = f"{parts[0]}_{suffix}.{parts[1]}"
+                            name_candidate = f"{parts[0]}_{suffix_count}.{parts[1]}"
                         else:
-                            name_candidate = f"{base_name}_{suffix}"
-                        suffix += 1
+                            name_candidate = f"{base_name}_{suffix_count}"
+                        suffix_count += 1
                     used_names.add(name_candidate)
 
-                    # Compose GCS path: include tweet id and preserve original filename
-                    media_blob_path = f"raw/X_news/{date_dir}/media/{tweet_id}_{name_candidate}" if tweet_id else f"raw/X_news/{date_dir}/media/{name_candidate}"
-
-                    # Download and upload to GCS (use temp file to avoid seek issues on stream)
+                    tweet_id_str = tid or ""
+                    media_blob_path = f"raw/X_news/{date_dir}/media/{tweet_id_str}_{name_candidate}" if tweet_id_str else f"raw/X_news/{date_dir}/media/{name_candidate}"
+                    
                     try:
                         dresp = requests.get(download_url, stream=True, timeout=60)
                         dresp.raise_for_status()
                         content_type = dresp.headers.get("Content-Type")
                         with tempfile.NamedTemporaryFile(prefix="x_media_", suffix=".bin", delete=True) as tmp:
                             for chunk in dresp.iter_content(chunk_size=1024 * 1024):
-                                if not chunk:
-                                    continue
+                                if not chunk: continue
                                 tmp.write(chunk)
                             tmp.flush()
                             tmp.seek(0)
                             media_blob = gcs_bucket.blob(media_blob_path)
                             media_blob.upload_from_file(tmp, content_type=content_type)
-                        media_gcs_paths.append(f"gs://{GCS_BUCKET}/{media_blob_path}")
-                        print(f"Uploaded media for tweet {tweet_id} to gs://{GCS_BUCKET}/{media_blob_path}")
+                        media_gcs_paths.append(f"gs://{gcs_bucket_name}/{media_blob_path}")
+                        print(f"Uploaded media for tweet {tid} to gs://{gcs_bucket_name}/{media_blob_path}")
                     except Exception as media_err:
-                        print(f"WARNING: failed to upload media for tweet {tweet_id} from {download_url}: {media_err}", file=sys.stderr)
+                        print(f"WARNING: failed to upload media {download_url}: {media_err}", file=sys.stderr)
 
                 record = {
-                    "id": t.get("id"),
+                    "id": tid,
                     "text": t.get("text"),
                     "author_username": id_to_username.get(author_id),
                     "created_at": created_at_raw,
@@ -310,72 +286,42 @@ def main() -> int:
                     "media_urls": media_urls,
                     "media_gcs_paths": media_gcs_paths,
                 }
-                lines.append(json.dumps(record, ensure_ascii=False))
-            blob = gcs_bucket.blob(gcs_blob_path)
-            blob.upload_from_string("\n".join(lines) + "\n", content_type="application/json")
-            print(f"Uploaded {len(tweets)} tweets to gs://{GCS_BUCKET}/{gcs_blob_path}")
-    except Exception as write_err:
-        print(f"WARNING: failed to upload tweets to GCS: {write_err}", file=sys.stderr)
+                cycle_tweets.append(json.dumps(record, ensure_ascii=False))
 
-    # Update cycle state with the highest tweet ID seen this run; only update global checkpoint at end of cycle
-    try:
-        tweet_ids = [t.get("id") for t in tweets if t.get("id")]
-        run_max_id: str | None = None
-        if tweet_ids:
-            run_max_id = max(tweet_ids, key=lambda s: int(s))
-        # Update cycle_max_seen_id
-        if run_max_id:
-            try:
-                cur_max = int(cycle_max_seen_id) if cycle_max_seen_id and str(cycle_max_seen_id).isdigit() else 0
-                new_max = int(run_max_id)
-                if new_max > cur_max:
-                    cycle_max_seen_id = run_max_id
-            except Exception:
-                cycle_max_seen_id = run_max_id
+        # Check if cycle is complete (this was the last batch)
+        if selected_index == num_batches - 1:
+            # End of cycle: upload buffered tweets and update checkpoint
+            if cycle_tweets:
+                now_utc = datetime.now(timezone.utc)
+                now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+                date_dir = now_et.strftime("%Y-%m-%d")
+                ts = now_et.strftime("%Y%m%dT%H%M%S%z")
+                gcs_blob_path = f"raw/X_news/{date_dir}/tweets_recent_{ts}.jsonl"
+                
+                try:
+                    blob = gcs_bucket.blob(gcs_blob_path)
+                    blob.upload_from_string("\n".join(cycle_tweets) + "\n", content_type="application/json")
+                    print(f"Uploaded {len(cycle_tweets)} tweets (cycle complete) to gs://{gcs_bucket_name}/{gcs_blob_path}")
+                except Exception as write_err:
+                    print(f"WARNING: failed to upload consolidated tweets: {write_err}", file=sys.stderr)
+            else:
+                print("Cycle complete. No new tweets found.")
 
-        # Determine if this is the last batch of the cycle
-        is_last_batch = (selected_index == num_batches - 1)
+            # Persist checkpoint if advanced
+            if cycle_max_seen_id is not None and cycle_max_seen_id != cycle_since_id:
+                try:
+                    since_blob = gcs_bucket.blob("ref/x_recent_since_id.json")
+                    since_blob.upload_from_string(json.dumps({"since_id": cycle_max_seen_id}), content_type="application/json")
+                    print(f"Updated checkpoint since_id to {cycle_max_seen_id}")
+                except Exception as e:
+                    print(f"WARNING: failed to persist checkpoint: {e}", file=sys.stderr)
 
-        # Persist updated cycle fields back to cursor
-        try:
-            cur_state = {
-                "next_index": (selected_index + 1) % num_batches,
-                "num_batches": num_batches,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "cycle_since_id": cycle_since_id,
-                "cycle_max_seen_id": cycle_max_seen_id,
-            }
-            gcs_bucket.blob(cursor_blob_name).upload_from_string(
-                json.dumps(cur_state), content_type="application/json"
-            )
-        except Exception:
-            pass
-
-        # At end of cycle, advance global since_id to the max seen and reset cycle fields
-        if is_last_batch and cycle_max_seen_id is not None:
-            # End of cycle: advance frozen baseline to running max and clear running max
-            cycle_since_id = cycle_max_seen_id
-            cycle_max_seen_id = None
-            try:
-                reset_state = {
-                    "next_index": (selected_index + 1) % num_batches,
-                    "num_batches": num_batches,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "cycle_since_id": cycle_since_id,
-                    "cycle_max_seen_id": cycle_max_seen_id,
-                }
-                gcs_bucket.blob(cursor_blob_name).upload_from_string(
-                    json.dumps(reset_state), content_type="application/json"
-                )
-            except Exception:
-                pass
-    except Exception:
-        pass
+        # Prepare for next batch
+        next_index += 1
+        time.sleep(poll_interval_sec)
 
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

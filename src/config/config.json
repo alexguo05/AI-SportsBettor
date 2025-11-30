@@ -36,6 +36,8 @@
     "BenStandig"
   ],
   "tweet_max_results": 30,
+  "x_poll_interval_sec": 30,
+  "gcs_bucket": "ai-sports-bettor",
   "sport": "americanfootball_nfl",
   "markets_list": [
     "player_receptions",
