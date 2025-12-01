@@ -24,13 +24,13 @@ def main() -> int:
     - Persists global since_id to GCS only at the end of each full cycle.
     """
 
-    # 1. Load configuration from config.json
-    config_path = Path(__file__).resolve().parents[1] / "config" / "config.json"
+    # 1. Load configuration from x_config.json
+    config_path = Path(__file__).resolve().parents[1] / "config" / "x_config.json"
     try:
         with config_path.open("r", encoding="utf-8") as cf:
             app_cfg = json.load(cf)
     except Exception as e:
-        print(f"ERROR: failed to load config.json: {e}", file=sys.stderr)
+        print(f"ERROR: failed to load x_config.json: {e}", file=sys.stderr)
         return 1
 
     base_handles = app_cfg.get("x_base_handles", [])
@@ -39,7 +39,7 @@ def main() -> int:
     gcs_bucket_name = app_cfg.get("gcs_bucket", "ai-sports-bettor")
 
     if not base_handles:
-        print("ERROR: x_base_handles missing in config.json", file=sys.stderr)
+        print("ERROR: x_base_handles missing in x_config.json", file=sys.stderr)
         return 1
 
     # 2. Load secrets from src/.env (X_BEARER_TOKEN)
