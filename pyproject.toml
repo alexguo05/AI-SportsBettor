@@ -17,6 +17,7 @@ dependencies = [
     "apscheduler>=3.10.4",
     "python-dotenv>=1.0.1",
     "google-cloud-storage>=2.18.0",
+    "cloud-sql-python-connector[pg8000]",
 ]
 
 [project.optional-dependencies]

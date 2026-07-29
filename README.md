@@ -16,7 +16,7 @@ for sports-market research.
 
 - Python 3.11+
 - pip or uv package manager
-- (Optional) PostgreSQL 16 for database storage
+- PostgreSQL 16, locally or through Google Cloud SQL
 
 ### Installation
 
@@ -41,9 +41,15 @@ python -m src.ingest_news.X_pull
 
 This will:
 - Query the accounts configured in `src/config/x_config.json`
-- Respect the X API query and polling limits
+- Paginate the current X API v2 recent-search endpoint
+- Recover stale or incompatible checkpoints with a bounded lookback window
 - Preserve source timestamps and ingestion timestamps
-- Upload consolidated JSONL batches to Google Cloud Storage
+- Upload versioned gzip JSON envelopes and attached media to Google Cloud Storage
+
+See [X ingestion and storage contract](docs/X_INGESTION.md) for the checkpoint,
+GCS layout, envelope schema, and PostgreSQL mapping.
+For Cloud SQL and the eventual Compute Engine collector, follow the
+[Google Cloud Console setup](docs/GCP_SETUP.md).
 
 ## 📁 Project Structure
 
@@ -72,16 +78,18 @@ AI-SportsBettor/
 
 - **Configured Sources**: Collects posts from selected NFL accounts
 - **Time Truth**: Preserves post and ingestion timestamps
-- **Rate-Aware Polling**: Splits handles into bounded query batches
-- **Audit Trail**: Stores consolidated raw JSONL batches in GCS
-- **Restart Safety**: Persists the latest processed post ID
+- **Rate-Aware Polling**: Splits handles into bounded query batches and paginates
+- **Audit Trail**: Stores normalized records and exact API responses in GCS
+- **Restart Safety**: Persists a timestamped, query-aware PostgreSQL cursor
+- **Database Ready**: Gives each post and media attachment stable upsert keys
+- **Transactional Metadata**: Commits records, media, and cursor atomically
 
 ## 🚧 Roadmap
 
 ### Week 1 (MVP)
 - [x] X news ingestion
-- [ ] PostgreSQL database setup (Docker Compose)
-- [ ] Database schema (Alembic migrations)
+- [x] PostgreSQL/Cloud SQL connection layer
+- [x] Database schema (Alembic migrations)
 - [ ] APScheduler automation
 
 ### Week 2+
@@ -105,13 +113,15 @@ AI-SportsBettor/
 ## 📊 Data Flow (Planned)
 
 ```
-X API → Raw JSONL in GCS → news_events table
-                               ↓
-                         Entity Resolution
-                               ↓
-                  Future Market Integration
-                               ↓
-                    Time-Aligned Analysis
+X API → Versioned raw envelope + media in GCS
+                         ↓
+          raw_ingest_objects / news_events / news_media
+                         ↓
+                  Entity Resolution
+                         ↓
+              Polymarket Integration
+                         ↓
+                Time-Aligned Analysis
 ```
 
 ## 📝 Example Usage

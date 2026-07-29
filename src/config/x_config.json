@@ -35,8 +35,13 @@
     "terrymc13",
     "BenStandig"
   ],
-  "tweet_max_results": 30,
-  "x_poll_interval_sec": 30,
+  "tweet_max_results": 100,
+  "x_poll_interval_sec": 10,
+  "x_query_max_characters": 512,
+  "x_max_pages_per_batch": 10,
+  "x_recovery_lookback_hours": 24,
+  "x_checkpoint_max_age_hours": 144,
+  "x_download_media": true,
   "gcs_bucket": "ai-sports-bettor"
 }
 
