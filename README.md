@@ -1,13 +1,13 @@
 # AI-SportsBettor
 
-A disciplined, ToS-safe pipeline that ingests NFL news via RSS, captures licensed sportsbook odds snapshots, and produces latency-aware datasets for modeling line moves and generating manual betting alerts (human-in-the-loop only).
+A pipeline for collecting timestamped NFL news and building auditable datasets
+for sports-market research.
 
 ## 🎯 Project Goals
 
-- Ingest NFL news from RSS feeds with proper timestamp handling
-- Capture licensed odds snapshots (no scraping)
-- Time-align news to pre-news baseline prices
-- Generate manual betting alerts (no automated wagering)
+- Ingest NFL news from selected X accounts with proper timestamp handling
+- Preserve raw source payloads in Google Cloud Storage
+- Prepare trustworthy, time-aware inputs for future market analysis
 - Maintain full audit trail with raw data preservation
 
 ## 🚀 Quick Start
@@ -32,37 +32,34 @@ cp .env.example .env
 # Edit .env with your configuration
 ```
 
-### Running RSS News Ingestion
+### Running X News Ingestion
 
 ```bash
-# Fetch NFL news from RSS feeds
-python -m src.ingest_news.rss_pull
+# Continuously fetch NFL news from configured X accounts
+python -m src.ingest_news.X_pull
 ```
 
 This will:
-- Pull from 5 major NFL news sources (ESPN, CBS, PFT, NFL.com, SI)
-- Normalize all timestamps to UTC
-- Clean HTML content from articles
-- Save raw JSONL data to `data/raw/news/YYYY-MM-DD/`
-- Print summary statistics
+- Query the accounts configured in `src/config/x_config.json`
+- Respect the X API query and polling limits
+- Preserve source timestamps and ingestion timestamps
+- Upload consolidated JSONL batches to Google Cloud Storage
 
 ## 📁 Project Structure
 
 ```
 AI-SportsBettor/
 ├── src/
-│   ├── ingest_news/      # RSS news ingestion
-│   │   ├── rss_pull.py   # Main RSS fetching script
-│   │   └── README.md     # News ingestion docs
-│   ├── ingest_odds/      # Odds API client (TODO)
-│   ├── features/         # Entity resolution & linking (TODO)
+│   ├── ingest_news/
+│   │   └── X_pull.py     # X news ingestion
+│   ├── config/
+│   │   └── x_config.json
 │   └── common/           # Shared utilities & config
 │       ├── settings.py   # Configuration management
 │       └── logging_config.py
 ├── data/
 │   ├── raw/
-│   │   ├── news/         # Raw news JSONL files
-│   │   └── odds/         # Raw odds JSONL files
+│   │   └── news/         # Optional local raw news data
 │   └── ref/              # Reference data (teams, schedules)
 ├── infra/                # Docker Compose, migrations (TODO)
 ├── tests/                # Unit tests (TODO)
@@ -71,27 +68,26 @@ AI-SportsBettor/
 
 ## 🔑 Key Features (Current)
 
-### RSS News Ingestion ✅
+### X News Ingestion ✅
 
-- **Multiple Sources**: ESPN, CBS Sports, Pro Football Talk, NFL.com, Sports Illustrated
-- **Time Truth**: Captures `published`, `updated`, and `first_seen` timestamps
-- **UTC Everywhere**: All timestamps normalized to UTC
-- **Content Deduplication**: SHA256 hash-based deduplication
-- **Audit Trail**: Raw JSONL files with complete provenance
-- **HTML Cleaning**: BeautifulSoup removes tags and normalizes whitespace
+- **Configured Sources**: Collects posts from selected NFL accounts
+- **Time Truth**: Preserves post and ingestion timestamps
+- **Rate-Aware Polling**: Splits handles into bounded query batches
+- **Audit Trail**: Stores consolidated raw JSONL batches in GCS
+- **Restart Safety**: Persists the latest processed post ID
 
 ## 🚧 Roadmap
 
 ### Week 1 (MVP)
-- [x] RSS news ingestion
+- [x] X news ingestion
 - [ ] PostgreSQL database setup (Docker Compose)
 - [ ] Database schema (Alembic migrations)
-- [ ] Odds API integration (The Odds API)
-- [ ] News-to-event linking
 - [ ] APScheduler automation
 
 ### Week 2+
 - [ ] Team/entity normalization
+- [ ] Polymarket ingestion
+- [ ] News-to-market linking
 - [ ] Weather data integration
 - [ ] Player props
 - [ ] Closing line value (CLV) metrics
@@ -100,47 +96,30 @@ AI-SportsBettor/
 
 ## 🛡️ Non-Negotiables
 
-- **ToS-Safe**: Only licensed APIs, no sportsbook scraping
+- **ToS-Safe**: Use authorized APIs and respect provider terms
 - **UTC Everywhere**: All timestamps in UTC
-- **Audit Trail**: Raw payloads stored on disk
+- **Audit Trail**: Preserve raw source payloads
 - **Human-in-the-Loop**: No automated wagering
-- **Time Truth**: Proper event-time handling with pre-news baselines
+- **Time Truth**: Preserve source and ingestion timestamps
 
 ## 📊 Data Flow (Planned)
 
 ```
-RSS Feeds → Raw JSONL → news_events table
-                              ↓
+X API → Raw JSONL in GCS → news_events table
+                               ↓
                          Entity Resolution
-                              ↓
-Odds API → Raw JSONL → odds_snapshots table
-                              ↓
-                    Time-Aligned Linking
-                              ↓
-                     news_odds_links table
-                              ↓
-                      Feature Engineering
-                              ↓
-                          Modeling
-                              ↓
-                     Manual Alerts 🚨
+                               ↓
+                  Future Market Integration
+                               ↓
+                    Time-Aligned Analysis
 ```
 
 ## 📝 Example Usage
 
-### Fetch Latest NFL News
+### Start X Collection
 
-```python
-from src.ingest_news.rss_pull import pull_all_feeds, save_to_jsonl
-from src.common.settings import settings
-
-# Pull all configured feeds
-entries = pull_all_feeds()
-
-# Save to disk
-save_to_jsonl(entries, settings.data_raw_news_dir)
-
-print(f"Collected {len(entries)} news entries")
+```bash
+python -m src.ingest_news.X_pull
 ```
 
 ## 🤝 Contributing
