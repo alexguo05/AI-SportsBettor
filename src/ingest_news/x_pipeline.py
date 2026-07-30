@@ -26,6 +26,10 @@ from google.oauth2 import service_account
 X_RECENT_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
 SCHEMA_NAME = "x_posts"
 SCHEMA_VERSION = 3
+MEDIA_SCHEMA_VERSION = 1
+RAW_STORAGE_ROOT = "raw"
+X_STORAGE_PROVIDER = "x"
+X_STORAGE_SOURCE = "recent-search"
 MAX_ARCHIVED_MEDIA_BYTES = 25 * 1024 * 1024
 
 TWEET_FIELDS = ",".join(
@@ -501,6 +505,19 @@ def _media_extension(url: str, content_type: str | None) -> str:
     }.get((content_type or "").split(";")[0].lower(), ".bin")
 
 
+def build_media_object_path(post_id: str, media_key: str, extension: str) -> str:
+    return (
+        f"{RAW_STORAGE_ROOT}/provider={X_STORAGE_PROVIDER}/"
+        f"source={X_STORAGE_SOURCE}/object=media/schema=v{MEDIA_SCHEMA_VERSION}/"
+        f"post_id={post_id}/{media_key}{extension}"
+    )
+
+
+def build_legacy_media_object_path(post_id: str, media_key: str, extension: str) -> str:
+    """Return the pre-cutover location used only to avoid duplicate uploads."""
+    return f"raw/media-schema=v1/source=x/post_id={post_id}/{media_key}{extension}"
+
+
 def upload_media(
     bucket: Any,
     bucket_name: str,
@@ -533,7 +550,7 @@ def upload_media(
         "image/jpeg" if media.get("stored_asset_kind") == "video_preview" else None
     )
     extension = _media_extension(selected_url, expected_content_type)
-    object_path = f"raw/media-schema=v1/source=x/post_id={post_id}/{media_key}{extension}"
+    object_path = build_media_object_path(post_id, str(media_key), extension)
     blob = bucket.blob(object_path)
     if blob.exists():
         print(f"Media {media_key} for X post {post_id} already exists; skipping download")
@@ -542,6 +559,20 @@ def upload_media(
             "gcs_uri": f"gs://{bucket_name}/{object_path}",
             "content_type": getattr(blob, "content_type", None),
             "byte_size": getattr(blob, "size", None),
+            "upload_status": "already_exists",
+        }
+    legacy_object_path = build_legacy_media_object_path(post_id, str(media_key), extension)
+    legacy_blob = bucket.blob(legacy_object_path)
+    if legacy_blob.exists():
+        print(
+            f"Media {media_key} for X post {post_id} exists at the legacy path; "
+            "skipping download"
+        )
+        return {
+            **base_result,
+            "gcs_uri": f"gs://{bucket_name}/{legacy_object_path}",
+            "content_type": getattr(legacy_blob, "content_type", None),
+            "byte_size": getattr(legacy_blob, "size", None),
             "upload_status": "already_exists",
         }
     try:
@@ -687,7 +718,8 @@ def max_post_id(values: Iterable[str | None]) -> str | None:
 def build_object_path(ingested_at: datetime, ingest_run_id: str) -> str:
     utc = ingested_at.astimezone(UTC)
     return (
-        f"raw/schema=v{SCHEMA_VERSION}/source=x/posts/"
+        f"{RAW_STORAGE_ROOT}/provider={X_STORAGE_PROVIDER}/"
+        f"source={X_STORAGE_SOURCE}/object=posts/schema=v{SCHEMA_VERSION}/"
         f"date={utc:%Y-%m-%d}/hour={utc:%H}/"
         f"x_posts_{ingest_run_id}.json.gz"
     )

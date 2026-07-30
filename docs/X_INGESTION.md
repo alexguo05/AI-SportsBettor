@@ -50,20 +50,28 @@ before the first restart if more recent-search backfill is required.
 Raw post envelopes:
 
 ```text
-raw/schema=v3/source=x/posts/date=YYYY-MM-DD/hour=HH/x_posts_<run_id>.json.gz
+raw/provider=x/source=recent-search/object=posts/schema=v3/date=YYYY-MM-DD/hour=HH/x_posts_<run_id>.json.gz
 ```
 
 Downloaded media:
 
 ```text
-raw/media-schema=v1/source=x/post_id=<post_id>/<media_key>.<ext>
+raw/provider=x/source=recent-search/object=media/schema=v1/post_id=<post_id>/<media_key>.<ext>
 ```
 
+The path hierarchy groups objects by provider, ingestion source, object type,
+and then that object's schema version. Post-envelope schema `v3` and media
+storage schema `v1` are independent contracts; the latter versions media path
+and archival behavior rather than the X post envelope.
+
 All post-envelope partitions and timestamps use UTC. Media object names are
-globally deterministic, so retries check GCS before downloading. Photos are
-stored in full. Videos and animated GIFs store only their preview image while
-retaining original type, duration, source URL, and variants in the raw
-envelope. Selected assets larger than 25 MiB are marked `skipped_too_large`.
+globally deterministic, so retries check GCS before downloading. The collector
+also checks the legacy
+`raw/media-schema=v1/source=x/post_id=<post_id>/<media_key>.<ext>` location to
+avoid uploading an existing asset twice. Photos are stored in full. Videos and
+animated GIFs store only their preview image while retaining original type,
+duration, source URL, and variants in the raw envelope. Selected assets larger
+than 25 MiB are marked `skipped_too_large`.
 
 ## Envelope schema
 

@@ -12,6 +12,8 @@ from src.ingest_news.x_pipeline import (
     SearchResult,
     XConfig,
     XRecentSearchClient,
+    build_media_object_path,
+    build_object_path,
     build_query_batches,
     choose_cursor,
     decode_envelope,
@@ -280,7 +282,10 @@ def test_video_metadata_selects_preview_instead_of_full_video() -> None:
 
 def test_existing_media_is_skipped_before_download() -> None:
     bucket = FakeBucket()
-    object_path = "raw/media-schema=v1/source=x/post_id=200/13_video.jpg"
+    object_path = (
+        "raw/provider=x/source=recent-search/object=media/schema=v1/"
+        "post_id=200/13_video.jpg"
+    )
     bucket.blob(object_path).data = b"existing"
     session = FakeSession([])
     media = normalize_posts([sample_video_result()], NOW)[0]["media"][0]
@@ -296,6 +301,37 @@ def test_existing_media_is_skipped_before_download() -> None:
     assert result["upload_status"] == "already_exists"
     assert result["gcs_uri"] == f"gs://bucket/{object_path}"
     assert session.calls == []
+
+
+def test_existing_legacy_media_is_not_uploaded_again() -> None:
+    bucket = FakeBucket()
+    legacy_path = "raw/media-schema=v1/source=x/post_id=200/13_video.jpg"
+    bucket.blob(legacy_path).data = b"existing"
+    session = FakeSession([])
+    media = normalize_posts([sample_video_result()], NOW)[0]["media"][0]
+
+    result = upload_media(
+        bucket,
+        "bucket",
+        "200",
+        media,
+        session=session,  # type: ignore[arg-type]
+    )
+
+    assert result["upload_status"] == "already_exists"
+    assert result["gcs_uri"] == f"gs://bucket/{legacy_path}"
+    assert session.calls == []
+
+
+def test_storage_paths_group_by_provider_source_object_and_schema() -> None:
+    assert build_object_path(NOW, "run-id") == (
+        "raw/provider=x/source=recent-search/object=posts/schema=v3/"
+        "date=2026-07-29/hour=18/x_posts_run-id.json.gz"
+    )
+    assert build_media_object_path("200", "13_video", ".jpg") == (
+        "raw/provider=x/source=recent-search/object=media/schema=v1/"
+        "post_id=200/13_video.jpg"
+    )
 
 
 def test_stale_or_changed_checkpoint_uses_bounded_recovery_window() -> None:
