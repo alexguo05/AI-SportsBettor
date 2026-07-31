@@ -26,6 +26,7 @@ dependencies = [
 [project.scripts]
 enrich-news-dry-run = "src.enrich_news.dry_run:main"
 enrich-news-backfill = "src.enrich_news.worker:main"
+clob-order-books = "src.ingest_odds.clob_order_book_pipeline:main"
 
 [project.optional-dependencies]
 dev = [

@@ -12,5 +12,10 @@
   "clob_price_initial_lookback_minutes": 15,
   "clob_price_batch_size": 20,
   "clob_price_timeout_seconds": 30,
-  "clob_price_max_attempts": 5
+  "clob_price_max_attempts": 5,
+  "clob_order_book_poll_interval_seconds": 60,
+  "clob_order_book_depth_usdc": 10000,
+  "clob_order_book_batch_size": 500,
+  "clob_order_book_timeout_seconds": 30,
+  "clob_order_book_max_attempts": 5
 }
