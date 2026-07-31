@@ -17,6 +17,8 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "news_events",
         "news_event_relationships",
         "news_media",
+        "news_enrichments",
+        "news_enrichment_tags",
         "ingest_cursors",
         "polymarket_events",
         "polymarket_event_versions",
@@ -35,6 +37,16 @@ def test_ingestion_schema_contains_expected_tables() -> None:
     assert "missing_since" in metadata.tables["polymarket_events"].columns
     assert "missing_since" in metadata.tables["polymarket_markets"].columns
     assert "last_structural_sha256" in metadata.tables["ingest_cursors"].columns
+    assert metadata.tables["news_enrichments"].primary_key.columns.keys() == [
+        "news_id",
+        "enrichment_version",
+    ]
+    enrichment_columns = metadata.tables["news_enrichments"].columns.keys()
+    tag_columns = metadata.tables["news_enrichment_tags"].columns.keys()
+    assert "primary_tag" not in enrichment_columns
+    assert "confidence" not in enrichment_columns
+    assert "certainty" in tag_columns
+    assert "confidence" not in tag_columns
 
 
 def test_envelope_and_record_map_to_relational_rows() -> None:

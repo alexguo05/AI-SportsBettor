@@ -305,6 +305,55 @@ polymarket_price_cursors = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+news_enrichments = Table(
+    "news_enrichments",
+    metadata,
+    Column(
+        "news_id",
+        String(128),
+        ForeignKey("news_events.news_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("enrichment_version", String(64), primary_key=True),
+    Column("provider", String(32), nullable=False),
+    Column("model_name", String(128), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("input_fingerprint", String(64), nullable=False),
+    Column("input_manifest", JSONB, nullable=False),
+    Column("information_status", String(32)),
+    Column("usefulness", String(32)),
+    Column("summary", Text),
+    Column("classification_reason", Text),
+    Column("entities", JSONB, nullable=False),
+    Column("claims", JSONB, nullable=False),
+    Column("usage", JSONB, nullable=False),
+    Column("warnings", JSONB, nullable=False),
+    Column("error", Text),
+    Column("started_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True)),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_news_enrichments_status", news_enrichments.c.status)
+Index("ix_news_enrichments_usefulness", news_enrichments.c.usefulness)
+
+news_enrichment_tags = Table(
+    "news_enrichment_tags",
+    metadata,
+    Column("news_id", String(128), primary_key=True),
+    Column("enrichment_version", String(64), primary_key=True),
+    Column("tag", String(64), primary_key=True),
+    Column("certainty", String(32), nullable=False),
+    Column("source_refs", JSONB, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    ForeignKeyConstraint(
+        ["news_id", "enrichment_version"],
+        ["news_enrichments.news_id", "news_enrichments.enrichment_version"],
+        ondelete="CASCADE",
+    ),
+)
+Index("ix_news_enrichment_tags_tag", news_enrichment_tags.c.tag)
+
 ingest_cursors = Table(
     "ingest_cursors",
     metadata,
