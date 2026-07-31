@@ -20,8 +20,8 @@ from urllib.parse import urlparse
 
 import requests
 from dotenv import dotenv_values
-from google.cloud import storage
-from google.oauth2 import service_account
+
+from src.common.gcs import canonical_json_bytes, create_gcs_client
 
 X_RECENT_SEARCH_URL = "https://api.x.com/2/tweets/search/recent"
 SCHEMA_NAME = "x_posts"
@@ -91,15 +91,6 @@ def parse_x_timestamp(value: str | datetime | None) -> datetime | None:
 
 def format_x_timestamp(value: datetime) -> str:
     return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-def canonical_json_bytes(value: Any) -> bytes:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -241,20 +232,6 @@ def load_bearer_token(src_dir: Path) -> str:
     if not token:
         raise ValueError("X_BEARER_TOKEN is not configured")
     return str(token)
-
-
-def create_gcs_client(src_dir: Path) -> storage.Client:
-    credentials_path = src_dir / "ai-sports-bettor-559e8837739f.json"
-    configured_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    if configured_path:
-        return storage.Client()
-    if credentials_path.exists():
-        credentials = service_account.Credentials.from_service_account_file(str(credentials_path))
-        return storage.Client(
-            credentials=credentials,
-            project=credentials.project_id,
-        )
-    return storage.Client()
 
 
 def build_query_batches(config: XConfig) -> list[str]:
@@ -747,8 +724,9 @@ def build_envelope(
     return {
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
-        "source": "x",
-        "object_type": "news_posts",
+        "provider": X_STORAGE_PROVIDER,
+        "source": X_STORAGE_SOURCE,
+        "object_type": "posts",
         "ingest_run_id": ingest_run_id,
         "ingested_at": ingested_at.astimezone(UTC).isoformat(),
         "storage_uri": storage_uri,

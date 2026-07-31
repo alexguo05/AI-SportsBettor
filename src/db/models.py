@@ -6,9 +6,11 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
+    Numeric,
     String,
     Table,
     Text,
@@ -30,6 +32,7 @@ raw_ingest_objects = Table(
     "raw_ingest_objects",
     metadata,
     Column("ingest_run_id", String(32), primary_key=True),
+    Column("provider", String(32), nullable=False),
     Column("source", String(32), nullable=False),
     Column("object_type", String(64), nullable=False),
     Column("schema_name", String(64), nullable=False),
@@ -119,12 +122,196 @@ news_media = Table(
 )
 Index("ix_news_media_processing_status", news_media.c.processing_status)
 
+polymarket_events = Table(
+    "polymarket_events",
+    metadata,
+    Column("event_id", String(128), primary_key=True),
+    Column("slug", Text),
+    Column("ticker", Text),
+    Column("title", Text, nullable=False),
+    Column("description", Text),
+    Column("category", String(64)),
+    Column("active", Boolean, nullable=False),
+    Column("closed", Boolean, nullable=False),
+    Column("start_at", DateTime(timezone=True)),
+    Column("end_at", DateTime(timezone=True)),
+    Column("tags", JSONB, nullable=False),
+    Column(
+        "latest_raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("current_content_sha256", String(64), nullable=False),
+    Column("first_observed_at", DateTime(timezone=True), nullable=False),
+    Column("last_observed_at", DateTime(timezone=True), nullable=False),
+    Column("missing_since", DateTime(timezone=True)),
+)
+Index("ix_polymarket_events_closed", polymarket_events.c.closed)
+Index("ix_polymarket_events_last_observed_at", polymarket_events.c.last_observed_at)
+
+polymarket_event_versions = Table(
+    "polymarket_event_versions",
+    metadata,
+    Column(
+        "event_id",
+        String(128),
+        ForeignKey("polymarket_events.event_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("observed_at", DateTime(timezone=True), primary_key=True),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("content_sha256", String(64), nullable=False),
+)
+
+polymarket_markets = Table(
+    "polymarket_markets",
+    metadata,
+    Column("market_id", String(128), primary_key=True),
+    Column(
+        "event_id",
+        String(128),
+        ForeignKey("polymarket_events.event_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("condition_id", String(128)),
+    Column("slug", Text),
+    Column("question", Text, nullable=False),
+    Column("sports_market_type", String(64)),
+    Column("line", Numeric),
+    Column("active", Boolean, nullable=False),
+    Column("closed", Boolean, nullable=False),
+    Column("accepting_orders", Boolean, nullable=False),
+    Column("enable_order_book", Boolean, nullable=False),
+    Column(
+        "latest_raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("current_content_sha256", String(64), nullable=False),
+    Column("first_observed_at", DateTime(timezone=True), nullable=False),
+    Column("last_observed_at", DateTime(timezone=True), nullable=False),
+    Column("missing_since", DateTime(timezone=True)),
+)
+Index("ix_polymarket_markets_event_id", polymarket_markets.c.event_id)
+Index("ix_polymarket_markets_closed", polymarket_markets.c.closed)
+Index("ix_polymarket_markets_condition_id", polymarket_markets.c.condition_id)
+
+polymarket_market_versions = Table(
+    "polymarket_market_versions",
+    metadata,
+    Column(
+        "market_id",
+        String(128),
+        ForeignKey("polymarket_markets.market_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("observed_at", DateTime(timezone=True), primary_key=True),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("content_sha256", String(64), nullable=False),
+)
+
+polymarket_tokens = Table(
+    "polymarket_tokens",
+    metadata,
+    Column("token_id", String(128), primary_key=True),
+    Column(
+        "market_id",
+        String(128),
+        ForeignKey("polymarket_markets.market_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("outcome_index", Integer, nullable=False),
+    Column("outcome", Text, nullable=False),
+    Column("first_observed_at", DateTime(timezone=True), nullable=False),
+    Column("last_observed_at", DateTime(timezone=True), nullable=False),
+)
+Index("ix_polymarket_tokens_market_id", polymarket_tokens.c.market_id)
+
+polymarket_price_points = Table(
+    "polymarket_price_points",
+    metadata,
+    Column(
+        "token_id",
+        String(128),
+        ForeignKey("polymarket_tokens.token_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("source_timestamp", DateTime(timezone=True), primary_key=True),
+    Column("price", Numeric, nullable=False),
+    Column("fidelity_minutes", Integer, nullable=False),
+    Column("first_observed_at", DateTime(timezone=True), nullable=False),
+    Column("last_observed_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "latest_raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+)
+Index(
+    "ix_polymarket_price_points_source_timestamp",
+    polymarket_price_points.c.source_timestamp,
+)
+
+polymarket_price_point_versions = Table(
+    "polymarket_price_point_versions",
+    metadata,
+    Column("token_id", String(128), primary_key=True),
+    Column("source_timestamp", DateTime(timezone=True), primary_key=True),
+    Column("observed_at", DateTime(timezone=True), primary_key=True),
+    Column("price", Numeric, nullable=False),
+    Column("fidelity_minutes", Integer, nullable=False),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    ForeignKeyConstraint(
+        ["token_id", "source_timestamp"],
+        [
+            "polymarket_price_points.token_id",
+            "polymarket_price_points.source_timestamp",
+        ],
+        ondelete="CASCADE",
+        deferrable=True,
+        initially="DEFERRED",
+    ),
+)
+
+polymarket_price_cursors = Table(
+    "polymarket_price_cursors",
+    metadata,
+    Column(
+        "token_id",
+        String(128),
+        ForeignKey("polymarket_tokens.token_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("query_fingerprint", String(64), nullable=False),
+    Column("last_end_ts", BigInteger, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
 ingest_cursors = Table(
     "ingest_cursors",
     metadata,
     Column("source", String(32), primary_key=True),
     Column("stream", String(64), primary_key=True),
     Column("query_fingerprint", String(64), nullable=False),
+    Column("last_structural_sha256", String(64)),
     Column("since_id", String(64)),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column("last_successful_poll_at", DateTime(timezone=True), nullable=False),

@@ -18,12 +18,23 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "news_event_relationships",
         "news_media",
         "ingest_cursors",
+        "polymarket_events",
+        "polymarket_event_versions",
+        "polymarket_markets",
+        "polymarket_market_versions",
+        "polymarket_tokens",
+        "polymarket_price_points",
+        "polymarket_price_point_versions",
+        "polymarket_price_cursors",
     }
     assert metadata.tables["news_events"].primary_key.columns.keys() == ["news_id"]
     assert metadata.tables["news_media"].primary_key.columns.keys() == [
         "news_id",
         "media_key",
     ]
+    assert "missing_since" in metadata.tables["polymarket_events"].columns
+    assert "missing_since" in metadata.tables["polymarket_markets"].columns
+    assert "last_structural_sha256" in metadata.tables["ingest_cursors"].columns
 
 
 def test_envelope_and_record_map_to_relational_rows() -> None:
@@ -79,8 +90,9 @@ def test_envelope_and_record_map_to_relational_rows() -> None:
     }
     envelope = {
         "ingest_run_id": "a" * 32,
-        "source": "x",
-        "object_type": "news_posts",
+        "provider": "x",
+        "source": "recent-search",
+        "object_type": "posts",
         "schema_name": "x_posts",
         "schema_version": 1,
         "storage_uri": "gs://bucket/envelope.json.gz",
@@ -106,3 +118,24 @@ def test_envelope_and_record_map_to_relational_rows() -> None:
     assert relationship_row["source_news_id"] == "x:200"
     assert relationship_row["target_news_id"] == "x:100"
     assert relationship_row["relationship_type"] == "retweeted"
+
+
+def test_legacy_x_envelope_maps_to_new_raw_dimensions() -> None:
+    raw_row = raw_object_values(
+        {
+            "ingest_run_id": "a" * 32,
+            "source": "x",
+            "object_type": "news_posts",
+            "schema_name": "x_posts",
+            "schema_version": 3,
+            "storage_uri": "gs://bucket/legacy.json.gz",
+            "content_sha256": "b" * 64,
+            "record_count": 1,
+            "ingested_at": NOW.isoformat(),
+            "request": {},
+        }
+    )
+
+    assert raw_row["provider"] == "x"
+    assert raw_row["source"] == "recent-search"
+    assert raw_row["object_type"] == "posts"

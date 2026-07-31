@@ -78,6 +78,8 @@ than 25 MiB are marked `skipped_too_large`.
 Each gzip-compressed JSON object contains:
 
 - `schema_name` and `schema_version` for migrations;
+- `provider=x`, `source=recent-search`, and `object_type=posts`, matching the
+  GCS hierarchy;
 - `ingest_run_id`, `ingested_at`, and the envelope's own `storage_uri`;
 - `content_sha256` over the canonical raw API responses;
 - request queries, cursor, query fingerprint, page count, and rate-limit
@@ -104,7 +106,8 @@ Each normalized news record contains:
 The Alembic migrations create five core tables:
 
 - `raw_ingest_objects`: one row per envelope, keyed by `ingest_run_id`, with
-  `storage_uri`, schema version, content hash, source, timestamps, and status;
+  `storage_uri`, schema version, content hash, provider, source, object type,
+  timestamps, and request metadata;
 - `news_events`: one row per `news_id`, with X identity, author identity,
   timestamps, text, source metadata JSON, and a foreign key to
   `raw_ingest_objects`;

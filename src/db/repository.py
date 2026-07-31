@@ -34,10 +34,18 @@ def _timestamp(value: str | datetime | None, field_name: str) -> datetime:
 
 
 def raw_object_values(envelope: dict[str, Any]) -> dict[str, Any]:
+    provider = envelope.get("provider") or envelope["source"]
+    source = envelope["source"]
+    object_type = envelope["object_type"]
+    if "provider" not in envelope and source == "x":
+        source = "recent-search"
+        if object_type == "news_posts":
+            object_type = "posts"
     return {
         "ingest_run_id": envelope["ingest_run_id"],
-        "source": envelope["source"],
-        "object_type": envelope["object_type"],
+        "provider": provider,
+        "source": source,
+        "object_type": object_type,
         "schema_name": envelope["schema_name"],
         "schema_version": envelope["schema_version"],
         "storage_uri": envelope["storage_uri"],

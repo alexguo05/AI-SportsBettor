@@ -1,0 +1,16 @@
+{
+  "gcs_bucket": "ai-sports-bettor",
+  "polymarket_tag_slug": "nfl",
+  "polymarket_closed": false,
+  "polymarket_page_size": 500,
+  "polymarket_max_pages": 100,
+  "polymarket_poll_interval_seconds": 900,
+  "polymarket_timeout_seconds": 30,
+  "polymarket_max_attempts": 5,
+  "clob_price_poll_interval_seconds": 900,
+  "clob_price_fidelity_minutes": 1,
+  "clob_price_initial_lookback_minutes": 15,
+  "clob_price_batch_size": 20,
+  "clob_price_timeout_seconds": 30,
+  "clob_price_max_attempts": 5
+}

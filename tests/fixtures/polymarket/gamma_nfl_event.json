@@ -1,0 +1,44 @@
+{
+  "id": "event-100",
+  "ticker": "NFL-KC-BUF",
+  "slug": "chiefs-vs-bills",
+  "title": "Kansas City Chiefs vs Buffalo Bills",
+  "description": "NFL divisional game",
+  "category": "sports",
+  "active": true,
+  "closed": false,
+  "startDate": "2026-09-10T17:00:00Z",
+  "tags": [{"id": "nfl", "label": "NFL"}],
+  "markets": [
+    {
+      "id": "market-team",
+      "conditionId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "slug": "will-the-chiefs-beat-the-bills",
+      "question": "Will the Chiefs beat the Bills?",
+      "sportsMarketType": "moneyline",
+      "active": true,
+      "closed": false,
+      "acceptingOrders": true,
+      "enableOrderBook": true,
+      "outcomes": "[\"Yes\",\"No\"]",
+      "outcomePrices": "[\"0.55\",\"0.45\"]",
+      "clobTokenIds": "[\"token-yes\",\"token-no\"]",
+      "liquidity": "12500.50",
+      "volume": "9876.25"
+    },
+    {
+      "id": "market-player",
+      "conditionId": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "slug": "patrick-mahomes-passing",
+      "question": "Will Patrick Mahomes II throw over 2.5 touchdowns?",
+      "sportsMarketType": "player_prop",
+      "active": true,
+      "closed": false,
+      "acceptingOrders": true,
+      "enableOrderBook": true,
+      "outcomes": "[\"Over\",\"Under\"]",
+      "outcomePrices": "[\"0.51\",\"0.49\"]",
+      "clobTokenIds": "[\"token-player-over\",\"token-player-under\"]"
+    }
+  ]
+}

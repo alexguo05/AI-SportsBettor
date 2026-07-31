@@ -51,6 +51,23 @@ GCS layout, envelope schema, and PostgreSQL mapping.
 For Cloud SQL and the eventual Compute Engine collector, follow the
 [Google Cloud Console setup](docs/GCP_SETUP.md).
 
+### Running Polymarket NFL Discovery
+
+```bash
+# Discover currently open Gamma events tagged NFL and preserve raw pages in GCS
+python -m src.ingest_odds.polymarket_pull
+
+# Preview one real cycle without writing to GCS or PostgreSQL
+python -m src.ingest_odds.polymarket_pull --dry-run
+
+# Incrementally collect CLOB prices for discovered open-market tokens
+python -m src.ingest_odds.clob_price_pull
+```
+
+This collector discovers events, markets, and CLOB outcome token IDs. See
+[Polymarket ingestion and storage contract](docs/POLYMARKET_INGESTION.md) for
+the path convention, version-history behavior, and PostgreSQL mapping.
+
 ## 📁 Project Structure
 
 ```
@@ -94,7 +111,8 @@ AI-SportsBettor/
 
 ### Week 2+
 - [ ] Team/entity normalization
-- [ ] Polymarket ingestion
+- [x] Polymarket Gamma event discovery
+- [x] Polymarket CLOB price history
 - [ ] News-to-market linking
 - [ ] Weather data integration
 - [ ] Player props
