@@ -1,4 +1,4 @@
-"""Bounded one-minute snapshots of public Polymarket CLOB order books."""
+"""Frequent bounded snapshots of public Polymarket CLOB order books."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def decimal_text(value: Decimal) -> str:
 @dataclass(frozen=True)
 class ClobOrderBookConfig:
     bucket_name: str = "ai-sports-bettor"
-    poll_interval_seconds: int = 60
+    poll_interval_seconds: int = 10
     depth_usdc: Decimal = DEFAULT_DEPTH_USDC
     batch_size: int = MAX_BATCH_SIZE
     timeout_seconds: float = 30
@@ -84,7 +84,7 @@ def load_config(path: Path) -> ClobOrderBookConfig:
         payload = json.load(file)
     return ClobOrderBookConfig(
         bucket_name=str(payload.get("gcs_bucket", "ai-sports-bettor")),
-        poll_interval_seconds=int(payload.get("clob_order_book_poll_interval_seconds", 60)),
+        poll_interval_seconds=int(payload.get("clob_order_book_poll_interval_seconds", 10)),
         depth_usdc=Decimal(str(payload.get("clob_order_book_depth_usdc", "10000"))),
         batch_size=int(payload.get("clob_order_book_batch_size", MAX_BATCH_SIZE)),
         timeout_seconds=float(payload.get("clob_order_book_timeout_seconds", 30)),
@@ -626,7 +626,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(
         "Starting Polymarket CLOB order-book poller. "
-        f"Interval: {config.poll_interval_seconds}s. "
+        f"Sleep between cycles: {config.poll_interval_seconds}s. "
         f"Depth: ${decimal_text(config.depth_usdc)} per side. "
         f"Bucket: {config.bucket_name}"
     )

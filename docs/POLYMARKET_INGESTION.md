@@ -20,7 +20,7 @@ object.
 
 The separate CLOB collector uses the outcome token IDs discovered by Gamma and
 stores incremental public price history. A second CLOB collector takes bounded
-one-minute order-book snapshots for every open token that accepts orders.
+high-frequency order-book snapshots for every open token that accepts orders.
 
 ## Running
 
@@ -75,7 +75,8 @@ Configuration is in `src/config/polymarket_config.json`:
 - `clob_price_initial_lookback_minutes`: first-cycle history window
 - `clob_price_batch_size`: token IDs per request, maximum 20
 - `clob_price_timeout_seconds` and `clob_price_max_attempts`: HTTP controls
-- `clob_order_book_poll_interval_seconds`: snapshot interval, default 60 seconds
+- `clob_order_book_poll_interval_seconds`: sleep after each complete snapshot
+  cycle, default 10 seconds; current cycles take about five additional seconds
 - `clob_order_book_depth_usdc`: cumulative executable notional retained per side
 - `clob_order_book_batch_size`: token IDs per `/books` request, maximum 500
 - `clob_order_book_timeout_seconds` and `clob_order_book_max_attempts`: HTTP controls
@@ -202,7 +203,7 @@ Description=AI Sports Bettor Polymarket CLOB Price Ingestion
 ExecStart=/opt/ai-sports-bettor/.venv/bin/python -m src.ingest_odds.clob_price_pull
 ```
 
-The one-minute order-book collector should run as a third unit:
+The frequent order-book collector should run as a third unit:
 
 ```ini
 Description=AI Sports Bettor Polymarket CLOB Order Book Ingestion
