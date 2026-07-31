@@ -48,6 +48,8 @@ This will:
 
 See [X ingestion and storage contract](docs/X_INGESTION.md) for the checkpoint,
 GCS layout, envelope schema, and PostgreSQL mapping.
+See [news enrichment contract](docs/NEWS_ENRICHMENT.md) for versioned Claude
+tagging, article/image/video-frame processing, and local-only dry runs.
 For Cloud SQL and the eventual Compute Engine collector, follow the
 [Google Cloud Console setup](docs/GCP_SETUP.md).
 

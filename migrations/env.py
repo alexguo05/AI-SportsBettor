@@ -15,7 +15,15 @@ target_metadata = metadata
 
 
 def run_migrations_offline() -> None:
-    raise RuntimeError("Offline migrations are not supported by the Cloud SQL connector")
+    context.configure(
+        url="postgresql://",
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        compare_type=True,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
 
 
 def run_migrations_online() -> None:

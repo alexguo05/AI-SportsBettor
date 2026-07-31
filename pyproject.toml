@@ -4,9 +4,12 @@ version = "0.1.0"
 description = "Timestamped sports news ingestion pipeline"
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.120.2,<1",
     "requests>=2.32.0",
     "feedparser>=6.0.11",
     "beautifulsoup4>=4.12.3",
+    "imageio-ffmpeg>=0.6.0,<1",
+    "Pillow>=12.3.0,<13",
     "python-dateutil>=2.9.0",
     "pandas>=2.2.0",
     "pydantic>=2.7.0",
@@ -19,6 +22,10 @@ dependencies = [
     "google-cloud-storage>=2.18.0",
     "cloud-sql-python-connector[pg8000]",
 ]
+
+[project.scripts]
+enrich-news-dry-run = "src.enrich_news.dry_run:main"
+enrich-news-backfill = "src.enrich_news.worker:main"
 
 [project.optional-dependencies]
 dev = [
