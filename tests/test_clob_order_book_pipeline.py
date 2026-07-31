@@ -252,7 +252,7 @@ def test_dry_run_defaults_to_ten_database_tokens() -> None:
     assert args.limit == 10
 
 
-def test_repository_keeps_depth_current_and_snapshots_only_summaries() -> None:
+def test_repository_keeps_only_current_depth_in_postgresql() -> None:
     record = normalize_book(raw_book(), depth_usdc=Decimal("100"), observed_at=NOW)
     connection = FakeSqlConnection()
     repository = OrderBookRepository(  # type: ignore[arg-type]
@@ -279,18 +279,14 @@ def test_repository_keeps_depth_current_and_snapshots_only_summaries() -> None:
     sql = [
         str(statement.compile(dialect=postgresql.dialect())) for statement in connection.statements
     ]
-    snapshot_insert = next(
-        statement
-        for statement in sql
-        if statement.startswith("INSERT INTO polymarket_order_book_snapshots")
-    )
     current_insert = next(
         statement
         for statement in sql
         if statement.startswith("INSERT INTO polymarket_current_order_books")
     )
-    assert "bids" not in snapshot_insert
-    assert "asks" not in snapshot_insert
+    assert not any(
+        statement.startswith("INSERT INTO polymarket_order_book_snapshots") for statement in sql
+    )
     assert "bids" in current_insert
     assert "asks" in current_insert
     assert "WHERE excluded.observed_at >= polymarket_current_order_books.observed_at" in (

@@ -124,9 +124,13 @@ flags make the bounded payload auditable without archiving discarded levels.
 - `polymarket_price_point_versions`: append-only corrected price values
 - `polymarket_price_cursors`: per-token incremental CLOB watermarks
 - `polymarket_current_order_books`: latest bounded bid/ask levels, one row per token
-- `polymarket_order_book_snapshots`: append-only best-price, spread, and liquidity
-  summaries keyed by token and observation time; full levels remain in GCS
 - `ingest_cursors`: last fully successful Gamma and CLOB cycles
+
+Historical full books remain only in GCS. `raw_ingest_objects` is the compact
+PostgreSQL index from ingestion time to immutable GCS URI; training jobs query
+that table for the relevant time window, then batch-download and extract books
+from the corresponding compressed envelopes. PostgreSQL intentionally does not
+duplicate global historical order-book summaries.
 
 Every current and versioned event or market row carries raw-ingest lineage.
 Current-state updates are guarded by `last_observed_at`, so replaying an older

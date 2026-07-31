@@ -18,7 +18,6 @@ from src.db.models import (
     polymarket_events,
     polymarket_market_versions,
     polymarket_markets,
-    polymarket_order_book_snapshots,
     polymarket_price_cursors,
     polymarket_price_point_versions,
     polymarket_price_points,
@@ -723,30 +722,6 @@ class OrderBookRepository:
             )
             for offset in range(0, len(rows), 500):
                 current_rows = rows[offset : offset + 500]
-                summary_rows = [
-                    {
-                        key: value
-                        for key, value in row.items()
-                        if key not in {"bids", "asks"}
-                    }
-                    for row in current_rows
-                ]
-                snapshot_insert = insert(polymarket_order_book_snapshots).values(
-                    summary_rows
-                )
-                connection.execute(
-                    snapshot_insert.on_conflict_do_update(
-                        index_elements=[
-                            polymarket_order_book_snapshots.c.token_id,
-                            polymarket_order_book_snapshots.c.observed_at,
-                        ],
-                        set_={
-                            column.name: getattr(snapshot_insert.excluded, column.name)
-                            for column in polymarket_order_book_snapshots.c
-                            if column.name not in {"token_id", "observed_at"}
-                        },
-                    )
-                )
                 current_insert = insert(polymarket_current_order_books).values(current_rows)
                 connection.execute(
                     current_insert.on_conflict_do_update(

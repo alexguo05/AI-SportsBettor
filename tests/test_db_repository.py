@@ -28,7 +28,6 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "polymarket_price_points",
         "polymarket_price_point_versions",
         "polymarket_price_cursors",
-        "polymarket_order_book_snapshots",
         "polymarket_current_order_books",
     }
     assert metadata.tables["news_events"].primary_key.columns.keys() == ["news_id"]
@@ -49,8 +48,7 @@ def test_ingestion_schema_contains_expected_tables() -> None:
     assert "confidence" not in enrichment_columns
     assert "certainty" in tag_columns
     assert "confidence" not in tag_columns
-    assert "bids" not in metadata.tables["polymarket_order_book_snapshots"].columns
-    assert "asks" not in metadata.tables["polymarket_order_book_snapshots"].columns
+    assert "polymarket_order_book_snapshots" not in metadata.tables
     assert "bids" in metadata.tables["polymarket_current_order_books"].columns
     assert "asks" in metadata.tables["polymarket_current_order_books"].columns
 
