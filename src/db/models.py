@@ -305,6 +305,90 @@ polymarket_price_cursors = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
 )
 
+polymarket_order_book_snapshots = Table(
+    "polymarket_order_book_snapshots",
+    metadata,
+    Column(
+        "token_id",
+        String(128),
+        ForeignKey("polymarket_tokens.token_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("observed_at", DateTime(timezone=True), primary_key=True),
+    Column("source_timestamp", DateTime(timezone=True), nullable=False),
+    Column("condition_id", String(128)),
+    Column("book_hash", String(128)),
+    Column("depth_usdc", Numeric, nullable=False),
+    Column("best_bid", Numeric),
+    Column("best_ask", Numeric),
+    Column("midpoint", Numeric),
+    Column("spread", Numeric),
+    Column("bid_captured_notional", Numeric, nullable=False),
+    Column("bid_captured_shares", Numeric, nullable=False),
+    Column("bid_total_notional", Numeric, nullable=False),
+    Column("bid_truncated", Boolean, nullable=False),
+    Column("ask_captured_notional", Numeric, nullable=False),
+    Column("ask_captured_shares", Numeric, nullable=False),
+    Column("ask_total_notional", Numeric, nullable=False),
+    Column("ask_truncated", Boolean, nullable=False),
+    Column("tick_size", Numeric),
+    Column("min_order_size", Numeric),
+    Column("last_trade_price", Numeric),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+)
+Index(
+    "ix_polymarket_order_book_snapshots_observed_at",
+    polymarket_order_book_snapshots.c.observed_at,
+)
+
+polymarket_current_order_books = Table(
+    "polymarket_current_order_books",
+    metadata,
+    Column(
+        "token_id",
+        String(128),
+        ForeignKey("polymarket_tokens.token_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("source_timestamp", DateTime(timezone=True), nullable=False),
+    Column("condition_id", String(128)),
+    Column("book_hash", String(128)),
+    Column("depth_usdc", Numeric, nullable=False),
+    Column("bids", JSONB, nullable=False),
+    Column("asks", JSONB, nullable=False),
+    Column("best_bid", Numeric),
+    Column("best_ask", Numeric),
+    Column("midpoint", Numeric),
+    Column("spread", Numeric),
+    Column("bid_captured_notional", Numeric, nullable=False),
+    Column("bid_captured_shares", Numeric, nullable=False),
+    Column("bid_total_notional", Numeric, nullable=False),
+    Column("bid_truncated", Boolean, nullable=False),
+    Column("ask_captured_notional", Numeric, nullable=False),
+    Column("ask_captured_shares", Numeric, nullable=False),
+    Column("ask_total_notional", Numeric, nullable=False),
+    Column("ask_truncated", Boolean, nullable=False),
+    Column("tick_size", Numeric),
+    Column("min_order_size", Numeric),
+    Column("last_trade_price", Numeric),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+)
+Index(
+    "ix_polymarket_current_order_books_observed_at",
+    polymarket_current_order_books.c.observed_at,
+)
+
 news_enrichments = Table(
     "news_enrichments",
     metadata,

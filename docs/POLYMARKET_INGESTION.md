@@ -19,7 +19,8 @@ changes; unchanged successful polls update the checkpoint without another GCS
 object.
 
 The separate CLOB collector uses the outcome token IDs discovered by Gamma and
-stores incremental public price history.
+stores incremental public price history. A second CLOB collector takes bounded
+one-minute order-book snapshots for every open token that accepts orders.
 
 ## Running
 
@@ -29,6 +30,7 @@ Apply migrations before starting the collector:
 alembic upgrade head
 python -m src.ingest_odds.polymarket_pull
 python -m src.ingest_odds.clob_price_pull
+python -m src.ingest_odds.clob_order_book_pull
 ```
 
 To inspect one real Gamma cycle locally without initializing GCS or PostgreSQL:
@@ -41,6 +43,21 @@ Dry-run mode fetches and normalizes the complete configured keyset traversal,
 then prints the proposed GCS URI, raw page count, compressed envelope size and
 hash, database row counts, and up to five sample events. It performs no GCS,
 PostgreSQL, migration, reconciliation, or checkpoint writes.
+
+By default, an order-book dry run reads ten eligible outcome token IDs from
+PostgreSQL. Use `--limit` to change the sample size, or repeat `--token-id` to
+override the database selection. Repeat `--depth-usdc` to compare bounded
+payload sizes from one set of API responses:
+
+```bash
+python -m src.ingest_odds.clob_order_book_pull --dry-run \
+  --limit 10 \
+  --depth-usdc 10000 --depth-usdc 20000 --depth-usdc 50000
+```
+
+Standard output is canonical JSON, one exact proposed cloud envelope per depth.
+Comparison statistics, including retained level counts and compressed and
+uncompressed bytes, are written to standard error.
 
 The public Gamma endpoint does not require an API key. The process reuses the
 same GCS and Cloud SQL credentials as X ingestion.
@@ -58,6 +75,10 @@ Configuration is in `src/config/polymarket_config.json`:
 - `clob_price_initial_lookback_minutes`: first-cycle history window
 - `clob_price_batch_size`: token IDs per request, maximum 20
 - `clob_price_timeout_seconds` and `clob_price_max_attempts`: HTTP controls
+- `clob_order_book_poll_interval_seconds`: snapshot interval, default 60 seconds
+- `clob_order_book_depth_usdc`: cumulative executable notional retained per side
+- `clob_order_book_batch_size`: token IDs per `/books` request, maximum 500
+- `clob_order_book_timeout_seconds` and `clob_order_book_max_attempts`: HTTP controls
 - `gcs_bucket`: raw archive bucket
 
 ## GCS layout
@@ -65,6 +86,7 @@ Configuration is in `src/config/polymarket_config.json`:
 ```text
 raw/provider=polymarket/source=gamma/object=events/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_events_<run_id>.json.gz
 raw/provider=polymarket/source=clob/object=price-history/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_prices_<run_id>.json.gz
+raw/provider=polymarket/source=clob/object=order-books/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_order_books_<run_id>.json.gz
 ```
 
 `provider` identifies Polymarket, `source` identifies the Gamma API surface,
@@ -84,6 +106,12 @@ Normalized records are intentionally not duplicated inside GCS. They are
 derived in memory for PostgreSQL, and replay can regenerate them from the exact
 provider responses.
 
+Order-book envelopes are the exception: they contain normalized bid and ask
+levels from best price outward until each side reaches the configured cumulative
+USDC depth. The boundary level is retained in full, and thin books retain every
+level. Per-side captured shares/notional, full-book notional, and truncation
+flags make the bounded payload auditable without archiving discarded levels.
+
 ## PostgreSQL mapping
 
 - `raw_ingest_objects`: one row per archived Gamma cycle
@@ -95,6 +123,9 @@ provider responses.
 - `polymarket_price_points`: latest CLOB value keyed by token and source timestamp
 - `polymarket_price_point_versions`: append-only corrected price values
 - `polymarket_price_cursors`: per-token incremental CLOB watermarks
+- `polymarket_current_order_books`: latest bounded bid/ask levels, one row per token
+- `polymarket_order_book_snapshots`: append-only best-price, spread, and liquidity
+  summaries keyed by token and observation time; full levels remain in GCS
 - `ingest_cursors`: last fully successful Gamma and CLOB cycles
 
 Every current and versioned event or market row carries raw-ingest lineage.
@@ -165,6 +196,13 @@ CLOB, changing the description and command to:
 ```ini
 Description=AI Sports Bettor Polymarket CLOB Price Ingestion
 ExecStart=/opt/ai-sports-bettor/.venv/bin/python -m src.ingest_odds.clob_price_pull
+```
+
+The one-minute order-book collector should run as a third unit:
+
+```ini
+Description=AI Sports Bettor Polymarket CLOB Order Book Ingestion
+ExecStart=/opt/ai-sports-bettor/.venv/bin/python -m src.ingest_odds.clob_order_book_pull
 ```
 
 The environment file name can be shared because Gamma needs no secret of its

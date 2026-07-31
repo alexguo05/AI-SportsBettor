@@ -13,10 +13,12 @@ from sqlalchemy.dialects.postgresql import insert
 from src.db.engine import DatabaseResources, create_database_resources
 from src.db.models import (
     ingest_cursors,
+    polymarket_current_order_books,
     polymarket_event_versions,
     polymarket_events,
     polymarket_market_versions,
     polymarket_markets,
+    polymarket_order_book_snapshots,
     polymarket_price_cursors,
     polymarket_price_point_versions,
     polymarket_price_points,
@@ -616,6 +618,156 @@ class PriceRepository:
             cursor_insert = insert(ingest_cursors).values(
                 source=POLYMARKET_CURSOR_SOURCE,
                 stream="clob_price_history",
+                query_fingerprint=checkpoint["query_fingerprint"],
+                last_structural_sha256=None,
+                since_id=checkpoint["since_id"],
+                updated_at=_timestamp(checkpoint["updated_at"], "checkpoint.updated_at"),
+                last_successful_poll_at=_timestamp(
+                    checkpoint["last_successful_poll_at"],
+                    "checkpoint.last_successful_poll_at",
+                ),
+            )
+            connection.execute(
+                cursor_insert.on_conflict_do_update(
+                    index_elements=[
+                        ingest_cursors.c.source,
+                        ingest_cursors.c.stream,
+                    ],
+                    set_={
+                        "query_fingerprint": cursor_insert.excluded.query_fingerprint,
+                        "since_id": cursor_insert.excluded.since_id,
+                        "updated_at": cursor_insert.excluded.updated_at,
+                        "last_successful_poll_at": (
+                            cursor_insert.excluded.last_successful_poll_at
+                        ),
+                    },
+                    where=(
+                        cursor_insert.excluded.last_successful_poll_at
+                        >= ingest_cursors.c.last_successful_poll_at
+                    ),
+                )
+            )
+
+
+class OrderBookRepository:
+    def __init__(self, resources: DatabaseResources) -> None:
+        self.resources = resources
+
+    @classmethod
+    def from_environment(cls, src_dir: Path) -> OrderBookRepository:
+        return cls(create_database_resources(src_dir))
+
+    def close(self) -> None:
+        self.resources.close()
+
+    def load_open_token_ids(self) -> list[str]:
+        with self.resources.engine.connect() as connection:
+            rows = connection.execute(
+                select(polymarket_tokens.c.token_id)
+                .join(
+                    polymarket_markets,
+                    polymarket_markets.c.market_id == polymarket_tokens.c.market_id,
+                )
+                .where(
+                    polymarket_markets.c.active.is_(True),
+                    polymarket_markets.c.closed.is_(False),
+                    polymarket_markets.c.accepting_orders.is_(True),
+                    polymarket_markets.c.enable_order_book.is_(True),
+                    polymarket_markets.c.missing_since.is_(None),
+                )
+                .order_by(polymarket_tokens.c.token_id)
+            )
+        return [str(row.token_id) for row in rows]
+
+    def persist_records(self, envelope: dict[str, Any]) -> None:
+        decimal_fields = (
+            "depth_usdc",
+            "best_bid",
+            "best_ask",
+            "midpoint",
+            "spread",
+            "bid_captured_notional",
+            "bid_captured_shares",
+            "bid_total_notional",
+            "ask_captured_notional",
+            "ask_captured_shares",
+            "ask_total_notional",
+            "tick_size",
+            "min_order_size",
+            "last_trade_price",
+        )
+        rows: list[dict[str, Any]] = []
+        for record in envelope["records"]:
+            row = {
+                **record,
+                "source_timestamp": _timestamp(
+                    record["source_timestamp"],
+                    "order_book.source_timestamp",
+                ),
+                "observed_at": _timestamp(
+                    record["observed_at"],
+                    "order_book.observed_at",
+                ),
+                "raw_ingest_run_id": envelope["ingest_run_id"],
+            }
+            for field_name in decimal_fields:
+                value = row[field_name]
+                row[field_name] = Decimal(str(value)) if value is not None else None
+            rows.append(row)
+
+        with self.resources.engine.begin() as connection:
+            connection.execute(
+                insert(raw_ingest_objects)
+                .values(**raw_object_values(envelope))
+                .on_conflict_do_nothing(index_elements=[raw_ingest_objects.c.ingest_run_id])
+            )
+            for offset in range(0, len(rows), 500):
+                current_rows = rows[offset : offset + 500]
+                summary_rows = [
+                    {
+                        key: value
+                        for key, value in row.items()
+                        if key not in {"bids", "asks"}
+                    }
+                    for row in current_rows
+                ]
+                snapshot_insert = insert(polymarket_order_book_snapshots).values(
+                    summary_rows
+                )
+                connection.execute(
+                    snapshot_insert.on_conflict_do_update(
+                        index_elements=[
+                            polymarket_order_book_snapshots.c.token_id,
+                            polymarket_order_book_snapshots.c.observed_at,
+                        ],
+                        set_={
+                            column.name: getattr(snapshot_insert.excluded, column.name)
+                            for column in polymarket_order_book_snapshots.c
+                            if column.name not in {"token_id", "observed_at"}
+                        },
+                    )
+                )
+                current_insert = insert(polymarket_current_order_books).values(current_rows)
+                connection.execute(
+                    current_insert.on_conflict_do_update(
+                        index_elements=[polymarket_current_order_books.c.token_id],
+                        set_={
+                            column.name: getattr(current_insert.excluded, column.name)
+                            for column in polymarket_current_order_books.c
+                            if column.name != "token_id"
+                        },
+                        where=(
+                            current_insert.excluded.observed_at
+                            >= polymarket_current_order_books.c.observed_at
+                        ),
+                    )
+                )
+
+    def finalize_cycle(self, checkpoint: dict[str, Any]) -> None:
+        with self.resources.engine.begin() as connection:
+            cursor_insert = insert(ingest_cursors).values(
+                source=POLYMARKET_CURSOR_SOURCE,
+                stream="clob_order_books",
                 query_fingerprint=checkpoint["query_fingerprint"],
                 last_structural_sha256=None,
                 since_id=checkpoint["since_id"],
