@@ -35,6 +35,7 @@ from src.enrich_news.sources import (
     extract_article_text,
     validate_public_url,
 )
+from src.enrich_news.worker import main as worker_main
 
 
 def test_structured_output_requires_unique_unordered_tags() -> None:
@@ -355,6 +356,23 @@ def test_repository_values_keep_tags_queryable() -> None:
     assert tags[0]["tag"] == "weather_field_conditions"
     assert tags[0]["certainty"] == "confident"
     assert "confidence" not in tags[0]
+
+
+def test_worker_rejects_persisting_mock_results(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = worker_main(
+        [
+            "--provider",
+            "mock",
+            "--apply",
+            "--confirm-live-writes",
+            "APPLY_ENRICHMENTS",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "--apply requires --provider claude" in capsys.readouterr().err
 
 
 def test_dry_run_cli_writes_only_local_results(tmp_path: Path) -> None:

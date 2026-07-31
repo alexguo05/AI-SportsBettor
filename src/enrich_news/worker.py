@@ -63,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.limit < 1 or args.limit > 100:
         print("ERROR: --limit must be between 1 and 100", file=sys.stderr)
         return 2
+    if args.apply and args.provider != "claude":
+        print("ERROR: --apply requires --provider claude", file=sys.stderr)
+        return 2
     if args.apply and args.confirm_live_writes != WRITE_CONFIRMATION:
         print(
             f"ERROR: --apply requires --confirm-live-writes {WRITE_CONFIRMATION}",

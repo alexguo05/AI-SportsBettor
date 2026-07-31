@@ -101,6 +101,7 @@ python -m src.enrich_news.dry_run `
 ```
 
 The dry-run module never initializes Cloud SQL or GCS.
+Mock-provider results cannot be applied to PostgreSQL.
 
 Read existing PostgreSQL candidates but keep results local:
 
