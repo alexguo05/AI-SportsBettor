@@ -18,9 +18,10 @@ Complete Gamma response pages are archived only when the structural event graph
 changes; unchanged successful polls update the checkpoint without another GCS
 object.
 
-The separate CLOB collector uses the outcome token IDs discovered by Gamma and
-stores incremental public price history. A second CLOB collector takes bounded
-high-frequency order-book snapshots for every open token that accepts orders.
+The CLOB collector uses outcome token IDs discovered by Gamma to capture bounded
+high-frequency order books for every open token that accepts orders. These books
+contain the best bid, best ask, midpoint, spread, last-trade price when supplied,
+and executable depth.
 
 ## Running
 
@@ -29,7 +30,6 @@ Apply migrations before starting the collector:
 ```bash
 alembic upgrade head
 python -m src.ingest_odds.polymarket_pull
-python -m src.ingest_odds.clob_price_pull
 python -m src.ingest_odds.clob_order_book_pull
 ```
 
@@ -70,11 +70,6 @@ Configuration is in `src/config/polymarket_config.json`:
 - `polymarket_max_pages`: safety limit; exceeding it fails the cycle
 - `polymarket_poll_interval_seconds`: delay between complete discovery cycles
 - `polymarket_timeout_seconds` and `polymarket_max_attempts`: HTTP controls
-- `clob_price_poll_interval_seconds`: delay between incremental price cycles
-- `clob_price_fidelity_minutes`: requested CLOB price sampling interval
-- `clob_price_initial_lookback_minutes`: first-cycle history window
-- `clob_price_batch_size`: token IDs per request, maximum 20
-- `clob_price_timeout_seconds` and `clob_price_max_attempts`: HTTP controls
 - `clob_order_book_poll_interval_seconds`: sleep after each complete snapshot
   cycle, default 10 seconds; current cycles take about five additional seconds
 - `clob_order_book_depth_usdc`: cumulative executable notional retained per side
@@ -86,7 +81,6 @@ Configuration is in `src/config/polymarket_config.json`:
 
 ```text
 raw/provider=polymarket/source=gamma/object=events/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_events_<run_id>.json.gz
-raw/provider=polymarket/source=clob/object=price-history/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_prices_<run_id>.json.gz
 raw/provider=polymarket/source=clob/object=order-books/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_order_books_<run_id>.json.gz
 ```
 
@@ -121,9 +115,6 @@ flags make the bounded payload auditable without archiving discarded levels.
 - `polymarket_markets`: latest observed market state
 - `polymarket_market_versions`: append-only changed market states
 - `polymarket_tokens`: market outcome to CLOB token mapping
-- `polymarket_price_points`: latest CLOB value keyed by token and source timestamp
-- `polymarket_price_point_versions`: append-only corrected price values
-- `polymarket_price_cursors`: per-token incremental CLOB watermarks
 - `polymarket_current_order_books`: latest bounded bid/ask levels, one row per token
 - `ingest_cursors`: last fully successful Gamma and CLOB cycles
 
@@ -163,12 +154,9 @@ checkpoint persistence fails, the next complete cycle safely re-observes the
 same graph. An unchanged structural fingerprint skips both the Gamma GCS upload
 and graph write.
 
-CLOB watermarks are per token, so newly discovered markets receive their own
-configured initial lookback instead of inheriting an older global cursor. A
-batch that omits any requested token fails the cycle and advances no token
-watermarks. The collector overlaps one fidelity interval on subsequent polls;
-unchanged points update current observation metadata without creating duplicate
-versions, while provider corrections append a price version.
+Each successful CLOB cycle archives one immutable order-book envelope, replaces
+the current PostgreSQL book for every eligible token, and advances the stream
+checkpoint. A partial or malformed batch fails before upload or persistence.
 
 Run this collector as a separate `systemd` service from `x-ingestion.service`.
 
@@ -196,14 +184,7 @@ WantedBy=multi-user.target
 ```
 
 Use a second unit with the same user, working directory, and environment for
-CLOB, changing the description and command to:
-
-```ini
-Description=AI Sports Bettor Polymarket CLOB Price Ingestion
-ExecStart=/opt/ai-sports-bettor/.venv/bin/python -m src.ingest_odds.clob_price_pull
-```
-
-The frequent order-book collector should run as a third unit:
+CLOB:
 
 ```ini
 Description=AI Sports Bettor Polymarket CLOB Order Book Ingestion

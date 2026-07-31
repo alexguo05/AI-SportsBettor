@@ -25,9 +25,6 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "polymarket_markets",
         "polymarket_market_versions",
         "polymarket_tokens",
-        "polymarket_price_points",
-        "polymarket_price_point_versions",
-        "polymarket_price_cursors",
         "polymarket_current_order_books",
     }
     assert metadata.tables["news_events"].primary_key.columns.keys() == ["news_id"]

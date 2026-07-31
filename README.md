@@ -62,8 +62,8 @@ python -m src.ingest_odds.polymarket_pull
 # Preview one real cycle without writing to GCS or PostgreSQL
 python -m src.ingest_odds.polymarket_pull --dry-run
 
-# Incrementally collect CLOB prices for discovered open-market tokens
-python -m src.ingest_odds.clob_price_pull
+# Collect current CLOB order books for discovered open-market tokens
+python -m src.ingest_odds.clob_order_book_pull
 ```
 
 This collector discovers events, markets, and CLOB outcome token IDs. See
@@ -114,7 +114,7 @@ AI-SportsBettor/
 ### Week 2+
 - [ ] Team/entity normalization
 - [x] Polymarket Gamma event discovery
-- [x] Polymarket CLOB price history
+- [x] Polymarket CLOB order-book ingestion
 - [ ] News-to-market linking
 - [ ] Weather data integration
 - [ ] Player props
