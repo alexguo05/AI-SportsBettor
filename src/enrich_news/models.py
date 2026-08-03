@@ -8,6 +8,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.entity_bank.models import MentionRole
+from src.entity_bank.normalization import normalize_name
+
 
 class TopicTag(StrEnum):
     INJURY_AVAILABILITY = "injury_availability"
@@ -120,16 +123,18 @@ class TagAssignment(BaseModel):
 class ExtractedEntity(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=500)
     entity_type: EntityType
+    mention_role: MentionRole
+    evidence: str = Field(min_length=1, max_length=2_000)
     confidence: float = Field(ge=0, le=1)
-    source_refs: list[str] = Field(default_factory=list, max_length=12)
+    source_refs: list[str] = Field(min_length=1, max_length=12)
 
 
 class ExtractedClaim(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    statement: str = Field(min_length=1, max_length=500)
+    statement: str = Field(min_length=1, max_length=2_000)
     confidence: float = Field(ge=0, le=1)
     source_refs: list[str] = Field(default_factory=list, max_length=12)
 
@@ -142,8 +147,8 @@ class EnrichmentOutput(BaseModel):
     tags: list[TagAssignment] = Field(min_length=1)
     information_status: InformationStatus
     usefulness: Usefulness
-    summary: str = Field(min_length=1, max_length=400)
-    classification_reason: str = Field(min_length=1, max_length=600)
+    summary: str = Field(min_length=1, max_length=2_000)
+    classification_reason: str = Field(min_length=1, max_length=4_000)
     entities: list[ExtractedEntity] = Field(default_factory=list, max_length=12)
     claims: list[ExtractedClaim] = Field(default_factory=list, max_length=8)
 
@@ -152,6 +157,20 @@ class EnrichmentOutput(BaseModel):
         tags = [assignment.tag for assignment in self.tags]
         if len(tags) != len(set(tags)):
             raise ValueError("tags must be unique")
+        deduplicated: dict[tuple[str, EntityType, MentionRole], ExtractedEntity] = {}
+        for entity in self.entities:
+            key = (
+                normalize_name(entity.name),
+                entity.entity_type,
+                entity.mention_role,
+            )
+            existing = deduplicated.get(key)
+            if existing is None:
+                deduplicated[key] = entity
+                continue
+            existing.confidence = max(existing.confidence, entity.confidence)
+            existing.source_refs = list(dict.fromkeys([*existing.source_refs, *entity.source_refs]))
+        self.entities = list(deduplicated.values())
         return self
 
 
@@ -171,6 +190,7 @@ class EnrichmentResult(BaseModel):
 
     news_id: str
     enrichment_version: str
+    entity_extractor_version: str
     provider: str
     model_name: str
     status: str

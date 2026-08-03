@@ -389,6 +389,8 @@ def test_repository_sql_guards_stale_state_and_checkpoint_updates() -> None:
     assert "polymarket_markets.missing_since IS NULL" in sql
     assert "polymarket_markets.last_observed_at <=" in sql
     assert "polymarket_markets.market_id NOT IN" in sql
+    assert "INSERT INTO job_outbox" in sql
+    assert "pg_notify" in sql
     assert not any(
         constraint.__class__.__name__ == "UniqueConstraint"
         for constraint in polymarket_tokens.constraints

@@ -110,9 +110,10 @@ flags make the bounded payload auditable without archiving discarded levels.
 ## PostgreSQL mapping
 
 - `raw_ingest_objects`: one row per archived Gamma cycle
-- `polymarket_events`: latest observed event state
+- `polymarket_events`: latest observed event state, including Gamma `game_id`
 - `polymarket_event_versions`: append-only changed event states
-- `polymarket_markets`: latest observed market state
+- `polymarket_markets`: latest observed market state, including
+  `group_item_title` and `group_item_threshold` for entity extraction
 - `polymarket_market_versions`: append-only changed market states
 - `polymarket_tokens`: market outcome to CLOB token mapping
 - `polymarket_current_order_books`: latest bounded bid/ask levels, one row per token

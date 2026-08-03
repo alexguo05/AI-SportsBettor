@@ -393,6 +393,12 @@ def normalize_market(
         ),
         "slug": payload.get("slug"),
         "question": str(question),
+        "group_item_title": payload.get("groupItemTitle"),
+        "group_item_threshold": (
+            str(payload["groupItemThreshold"])
+            if payload.get("groupItemThreshold") is not None
+            else None
+        ),
         "sports_market_type": payload.get("sportsMarketType"),
         "line": payload.get("line"),
         "active": bool(payload.get("active", False)),
@@ -423,6 +429,7 @@ def normalize_event(payload: dict[str, Any], observed_at: datetime) -> dict[str,
         "event_id": event_id_text,
         "slug": payload.get("slug"),
         "ticker": payload.get("ticker"),
+        "game_id": str(payload["gameId"]) if payload.get("gameId") is not None else None,
         "title": str(title),
         "description": payload.get("description"),
         "category": payload.get("category"),

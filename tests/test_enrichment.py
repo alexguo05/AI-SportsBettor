@@ -2,6 +2,7 @@ import json
 import socket
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import imageio_ffmpeg
 import pytest
@@ -16,6 +17,8 @@ from src.enrich_news.dry_run import main as dry_run_main
 from src.enrich_news.models import (
     EnrichmentOutput,
     EnrichmentResult,
+    EntityType,
+    ExtractedEntity,
     InformationStatus,
     NewsRecord,
     ProviderUsage,
@@ -25,9 +28,11 @@ from src.enrich_news.models import (
     Usefulness,
 )
 from src.enrich_news.pipeline import enrich_record
-from src.enrich_news.provider import DeterministicDryRunProvider, ProviderResponse
+from src.enrich_news.prompt import ENTITY_EXTRACTOR_VERSION, SYSTEM_PROMPT
+from src.enrich_news.provider import ClaudeProvider, DeterministicDryRunProvider, ProviderResponse
 from src.enrich_news.repository import enrichment_values, tag_values
 from src.enrich_news.sources import (
+    CollectedEvidence,
     DownloadedResource,
     _video_sample_timestamps,
     article_urls,
@@ -36,6 +41,7 @@ from src.enrich_news.sources import (
     validate_public_url,
 )
 from src.enrich_news.worker import main as worker_main
+from src.entity_bank.models import MentionRole
 
 
 def test_structured_output_requires_unique_unordered_tags() -> None:
@@ -58,6 +64,89 @@ def test_structured_output_requires_unique_unordered_tags() -> None:
             summary="A player left practice with an injury.",
             classification_reason="The source explicitly reports an injury and practice exit.",
         )
+
+
+def test_enrichment_contract_preserves_modality_and_extracts_irrelevant_entities() -> None:
+    assert "affirmative claim" in SYSTEM_PROMPT
+    assert "sarcastic or joking language" in SYSTEM_PROMPT
+    assert '"Player X wants a trade?!" does not establish' in SYSTEM_PROMPT
+    assert "must not state the rumored proposition as fact" in SYSTEM_PROMPT
+    assert "Usefulness and topic classification must never suppress" in SYSTEM_PROMPT
+    schema = EnrichmentOutput.model_json_schema()
+    summary_schema = schema["properties"]["summary"]
+    entity_schema = schema["$defs"]["ExtractedEntity"]["properties"]
+    claim_schema = schema["$defs"]["ExtractedClaim"]["properties"]
+    assert summary_schema["maxLength"] == 2_000
+    assert schema["properties"]["classification_reason"]["maxLength"] == 4_000
+    assert entity_schema["name"]["maxLength"] == 500
+    assert entity_schema["evidence"]["maxLength"] == 2_000
+    assert claim_schema["statement"]["maxLength"] == 2_000
+
+
+def test_claude_provider_retries_one_schema_validation_failure() -> None:
+    valid_output = EnrichmentOutput(
+        tags=[
+            TagAssignment(
+                tag=TopicTag.PROMOTIONAL_SOCIAL,
+                certainty=TagCertainty.CONFIDENT,
+                source_refs=["tweet"],
+            )
+        ],
+        information_status=InformationStatus.REPORTED,
+        usefulness=Usefulness.IRRELEVANT,
+        summary="Guardian Cap announced an endorsement with Jalen Pitre.",
+        classification_reason="The source reports a commercial athlete endorsement.",
+        entities=[],
+        claims=[],
+    )
+    with pytest.raises(ValueError) as caught:
+        EnrichmentOutput(
+            tags=valid_output.tags,
+            information_status=valid_output.information_status,
+            usefulness=valid_output.usefulness,
+            summary="x" * 2_001,
+            classification_reason=valid_output.classification_reason,
+        )
+
+    calls: list[dict[str, object]] = []
+
+    class Messages:
+        def parse(self, **kwargs: object) -> object:
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise caught.value
+            return SimpleNamespace(
+                parsed_output=valid_output,
+                stop_reason="end_turn",
+                usage=SimpleNamespace(
+                    input_tokens=10,
+                    output_tokens=5,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                ),
+            )
+
+    provider = ClaudeProvider.__new__(ClaudeProvider)
+    provider.model_name = "test-model"
+    provider.max_tokens = 1_000
+    provider.client = SimpleNamespace(messages=Messages())
+
+    response = provider.enrich(
+        CollectedEvidence(text_sections=["[tweet]\nGuardian Cap inks Jalen Pitre."])
+    )
+
+    assert response.output == valid_output
+    assert len(calls) == 2
+    assert "failed output-schema validation" in str(calls[1]["system"])
+
+    repaired = provider.repair(
+        CollectedEvidence(text_sections=["[tweet]\nGuardian Cap inks Jalen Pitre."]),
+        "Jalen Pitre: invalid excerpt",
+    )
+
+    assert repaired.output == valid_output
+    assert len(calls) == 3
+    assert "Do not combine separate passages" in str(calls[2]["system"])
 
 
 def test_enrichment_settings_load_ignored_src_env(
@@ -127,6 +216,308 @@ class _SourceRefProvider:
             usage=ProviderUsage(input_tokens=12, output_tokens=5),
             model_name=self.model_name,
         )
+
+
+class _EntityProvider:
+    provider_name = "test"
+    model_name = "test-model"
+
+    def __init__(self, *, evidence: str) -> None:
+        self.evidence = evidence
+
+    def enrich(self, _evidence: object) -> ProviderResponse:
+        output = EnrichmentOutput(
+            tags=[
+                TagAssignment(
+                    tag=TopicTag.ROSTER_TRANSACTION,
+                    certainty=TagCertainty.CONFIDENT,
+                    source_refs=["article:test"],
+                )
+            ],
+            information_status=InformationStatus.REPORTED,
+            usefulness=Usefulness.HIGH,
+            summary="Josh Allen remains with Buffalo.",
+            classification_reason="The article names the player and team.",
+            entities=[
+                ExtractedEntity(
+                    name="Josh Allen",
+                    entity_type=EntityType.PLAYER,
+                    mention_role=MentionRole.SUBJECT,
+                    evidence=self.evidence,
+                    confidence=0.9,
+                    source_refs=["article:test"],
+                ),
+                ExtractedEntity(
+                    name="Josh Allen",
+                    entity_type=EntityType.PLAYER,
+                    mention_role=MentionRole.SUBJECT,
+                    evidence=self.evidence,
+                    confidence=0.8,
+                    source_refs=["article:test"],
+                ),
+            ],
+        )
+        return ProviderResponse(
+            output=output,
+            usage=ProviderUsage(input_tokens=20, output_tokens=10),
+            model_name=self.model_name,
+        )
+
+
+def _output_with_entities(entities: list[ExtractedEntity]) -> EnrichmentOutput:
+    return EnrichmentOutput(
+        tags=[
+            TagAssignment(
+                tag=TopicTag.ROSTER_TRANSACTION,
+                certainty=TagCertainty.CONFIDENT,
+                source_refs=["tweet"],
+            )
+        ],
+        information_status=InformationStatus.REPORTED,
+        usefulness=Usefulness.HIGH,
+        summary="Entity evidence test.",
+        classification_reason="The source contains named NFL entities.",
+        entities=entities,
+        claims=[],
+    )
+
+
+class _EntityListProvider:
+    provider_name = "test"
+    model_name = "test-model"
+
+    def __init__(self, entities: list[ExtractedEntity]) -> None:
+        self.entities = entities
+
+    def enrich(self, _evidence: object) -> ProviderResponse:
+        return ProviderResponse(
+            output=_output_with_entities(self.entities),
+            usage=ProviderUsage(input_tokens=10, output_tokens=5),
+            model_name=self.model_name,
+        )
+
+
+def test_enrichment_emits_deduplicated_resolution_ready_article_mentions() -> None:
+    record = NewsRecord(
+        news_id="x:article-mention",
+        text="Read the linked roster report.",
+        prepared_article_evidence=[
+            {
+                "source_ref": "article:test",
+                "url": "https://example.test/roster",
+                "title": "Roster report",
+                "text": "Josh Allen remains with Buffalo.",
+            }
+        ],
+    )
+
+    result = enrich_record(
+        record,
+        _EntityProvider(evidence="Josh Allen remains with Buffalo."),
+        enrichment_version="v3",
+    )
+
+    assert result.status == "completed"
+    assert result.entity_extractor_version == ENTITY_EXTRACTOR_VERSION
+    assert result.output is not None
+    assert len(result.output.entities) == 1
+    assert result.output.entities[0].mention_role == MentionRole.SUBJECT
+    assert result.output.entities[0].source_refs == ["article:test"]
+
+
+def test_enrichment_drops_entity_absent_from_collected_sources() -> None:
+    record = NewsRecord(
+        news_id="x:bad-evidence",
+        text="No named player here.",
+        prepared_article_evidence=[
+            {
+                "source_ref": "article:test",
+                "url": "https://example.test/story",
+                "text": "The article also contains no named player.",
+            }
+        ],
+    )
+
+    result = enrich_record(
+        record,
+        _EntityProvider(evidence="Josh Allen remains with Buffalo."),
+        enrichment_version="v3",
+    )
+
+    assert result.status == "completed_with_warnings"
+    assert result.error is None
+    assert result.output is not None
+    assert result.output.entities == []
+    assert any("entity dropped after evidence validation" in item for item in result.warnings)
+
+
+def test_enrichment_repairs_detached_excerpt_from_same_cited_source() -> None:
+    record = NewsRecord(
+        news_id="x:detached-evidence",
+        text="Read the linked report.",
+        prepared_article_evidence=[
+            {
+                "source_ref": "article:test",
+                "url": "https://example.test/story",
+                "text": "Josh Allen practiced. The Buffalo quarterback was limited.",
+            }
+        ],
+    )
+
+    result = enrich_record(
+        record,
+        _EntityProvider(evidence="The Buffalo quarterback was limited."),
+        enrichment_version="v3",
+    )
+
+    assert result.status == "completed_with_warnings"
+    assert result.output is not None
+    assert "Josh Allen" in result.output.entities[0].evidence
+    assert result.warnings == ["entity evidence repaired from cited source: Josh Allen"]
+
+
+def test_enrichment_repairs_html_decoded_entity_evidence() -> None:
+    record = NewsRecord(
+        news_id="x:html-evidence",
+        text="Hear from Josh Allen &amp; the Buffalo offense.",
+    )
+    provider = _EntityListProvider(
+        [
+            ExtractedEntity(
+                name="Josh Allen",
+                entity_type=EntityType.PLAYER,
+                mention_role=MentionRole.SUBJECT,
+                evidence="Hear from Josh Allen & the Buffalo offense.",
+                confidence=0.9,
+                source_refs=["tweet"],
+            )
+        ]
+    )
+
+    result = enrich_record(record, provider)
+
+    assert result.status == "completed_with_warnings"
+    assert result.output is not None
+    assert result.output.entities[0].evidence == ("Hear from Josh Allen &amp; the Buffalo offense.")
+
+
+def test_enrichment_repairs_paraphrased_excerpt_from_cited_article() -> None:
+    record = NewsRecord(
+        news_id="x:paraphrased-evidence",
+        text="Read the linked report.",
+        prepared_article_evidence=[
+            {
+                "source_ref": "article:test",
+                "url": "https://example.test/story",
+                "text": "Josh Allen practiced Tuesday. The quarterback was limited.",
+            }
+        ],
+    )
+    provider = _EntityListProvider(
+        [
+            ExtractedEntity(
+                name="Josh Allen",
+                entity_type=EntityType.PLAYER,
+                mention_role=MentionRole.SUBJECT,
+                evidence="The report says Josh Allen was limited in practice.",
+                confidence=0.9,
+                source_refs=["article:test"],
+            )
+        ]
+    )
+
+    result = enrich_record(record, provider)
+
+    assert result.status == "completed_with_warnings"
+    assert result.output is not None
+    assert result.output.entities[0].evidence.startswith("Josh Allen practiced Tuesday.")
+
+
+def test_enrichment_keeps_valid_entities_when_one_is_invalid() -> None:
+    record = NewsRecord(news_id="x:partial-salvage", text="Josh Allen practiced.")
+    provider = _EntityListProvider(
+        [
+            ExtractedEntity(
+                name="Josh Allen",
+                entity_type=EntityType.PLAYER,
+                mention_role=MentionRole.SUBJECT,
+                evidence="Josh Allen practiced.",
+                confidence=0.9,
+                source_refs=["tweet"],
+            ),
+            ExtractedEntity(
+                name="Invented Player",
+                entity_type=EntityType.PLAYER,
+                mention_role=MentionRole.REFERENCED,
+                evidence="Invented Player practiced.",
+                confidence=0.6,
+                source_refs=["tweet"],
+            ),
+        ]
+    )
+
+    result = enrich_record(record, provider)
+
+    assert result.status == "completed_with_warnings"
+    assert result.output is not None
+    assert [entity.name for entity in result.output.entities] == ["Josh Allen"]
+    assert any("Invented Player" in item for item in result.warnings)
+
+
+def test_enrichment_retries_unrepairable_entity_evidence_once() -> None:
+    record = NewsRecord(
+        news_id="x:provider-repair",
+        text="Josh Allen practiced.",
+        prepared_media_evidence=[
+            {
+                "source_ref": "media:test",
+                "media_type": "image",
+                "ocr_text": "Practice report",
+            }
+        ],
+    )
+    invalid = ExtractedEntity(
+        name="Josh Allen",
+        entity_type=EntityType.PLAYER,
+        mention_role=MentionRole.SUBJECT,
+        evidence="Josh Allen was at practice.",
+        confidence=0.9,
+        source_refs=["media:test"],
+    )
+    valid = invalid.model_copy(
+        update={"evidence": "Josh Allen practiced.", "source_refs": ["tweet"]}
+    )
+
+    class RepairingProvider(_EntityListProvider):
+        repair_calls = 0
+
+        def repair(
+            self,
+            _evidence: object,
+            validation_feedback: str,
+        ) -> ProviderResponse:
+            self.repair_calls += 1
+            assert "no verbatim excerpt" in validation_feedback
+            return ProviderResponse(
+                output=_output_with_entities([valid]),
+                usage=ProviderUsage(input_tokens=7, output_tokens=3),
+                model_name=self.model_name,
+            )
+
+    provider = RepairingProvider([invalid])
+    result = enrich_record(record, provider)
+
+    assert result.status == "completed_with_warnings"
+    assert result.output is not None
+    assert result.output.entities[0].evidence == "Josh Allen practiced."
+    assert provider.repair_calls == 1
+    assert result.usage.input_tokens == 17
+    assert result.usage.output_tokens == 8
+
+
+def test_enrichment_prompt_excludes_brand_signings_from_roster_transactions() -> None:
+    assert "exclude endorsements, sponsorships" in SYSTEM_PROMPT
+    assert "brand, equipment vendor" in SYSTEM_PROMPT
 
 
 def test_pipeline_normalizes_exact_tweet_url_source_reference() -> None:
@@ -340,6 +731,7 @@ def test_repository_values_keep_tags_queryable() -> None:
     result = EnrichmentResult(
         news_id="x:5",
         enrichment_version="v1",
+        entity_extractor_version="news-enrichment-mentions-v2",
         provider="anthropic",
         model_name=DEFAULT_MODEL_NAME,
         status="completed",

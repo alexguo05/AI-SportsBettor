@@ -16,6 +16,8 @@ from src.db.models import (
     news_media,
     raw_ingest_objects,
 )
+from src.enrich_news.config import DEFAULT_ENRICHMENT_VERSION
+from src.jobs.repository import ENRICH_NEWS, enqueue_job
 
 X_CURSOR_SOURCE = "x"
 X_CURSOR_STREAM = "recent_search"
@@ -248,6 +250,17 @@ class NewsRepository:
                             updated_at=datetime.now(UTC),
                         )
                     )
+                news_id = str(record["news_id"])
+                enqueue_job(
+                    connection,
+                    job_type=ENRICH_NEWS,
+                    idempotency_key=f"{news_id}:{DEFAULT_ENRICHMENT_VERSION}",
+                    payload={
+                        "news_id": news_id,
+                        "enrichment_version": DEFAULT_ENRICHMENT_VERSION,
+                    },
+                    priority=10,
+                )
             cursor_insert = insert(ingest_cursors).values(
                 source=X_CURSOR_SOURCE,
                 stream=X_CURSOR_STREAM,

@@ -14,6 +14,8 @@ Each `(news_id, enrichment_version)` result has:
   or `unknown`);
 - independent usefulness (`high`, `medium`, `low`, or `irrelevant`);
 - a factual summary, classification reason, entities, and claims;
+- resolution-ready entity mentions with code-owned mention roles, verbatim
+  evidence, confidence, and source references;
 - source references that connect tags, entities, and claims to tweet, article,
   image, or video-frame evidence;
 - provider, exact model ID, prompt version, input fingerprint, source manifest,
@@ -52,6 +54,9 @@ Migration `20260731_05` adds:
 Raw source rows remain untouched. Reprocessing uses a new
 `enrichment_version` or deliberately replaces the same version.
 
+Migration `20260803_11` adds the entity-extractor version metadata used to
+distinguish the new mention contract from immutable legacy enrichment rows.
+
 ## Source processing
 
 Article processing follows only URLs directly represented in the X source
@@ -73,6 +78,12 @@ reported as `not_transcribed` unless a transcript is supplied by another
 component. The schema retains provided transcripts and makes that limitation
 visible rather than claiming unsupported audio analysis.
 
+News enrichment is the only LLM extraction pass for X evidence. It extracts
+mentions from the combined tweet/article/media evidence and validates textual
+mention evidence before persistence. The entity-bank worker later reads these
+objects and performs only canonical candidate retrieval and, when needed,
+allowlisted adjudication. It never asks a second model to extract the tweet.
+
 ## Safe local dry run
 
 Configure `ANTHROPIC_API_KEY`, `NEWS_ENRICHMENT_MODEL`, and
@@ -81,6 +92,10 @@ Configure `ANTHROPIC_API_KEY`, `NEWS_ENRICHMENT_MODEL`, and
 `claude-haiku-4-5-20251001`, which retains structured text and vision support
 at a lower token price than Sonnet. Output is capped at 1,536 tokens by default;
 override that only after evaluation with `NEWS_ENRICHMENT_MAX_OUTPUT_TOKENS`.
+The current resolution-ready contract uses enrichment version `v3`; older rows
+remain available as historical audit records. Version `v3` tightens entity
+evidence binding and distinguishes NFL roster transactions from commercial
+endorsements.
 
 Fully offline control-flow test:
 
@@ -114,11 +129,16 @@ Database persistence requires both `--apply` and the explicit confirmation:
 ```powershell
 python -m src.enrich_news.worker `
   --limit 20 `
+  --version v3 `
   --provider claude `
   --allow-network `
   --apply `
   --confirm-live-writes APPLY_ENRICHMENTS
 ```
 
-Do not use the applying form until migration `20260731_05` has been reviewed and
-applied to the intended database.
+To backfill all existing tweets, repeat the applying command in batches of up
+to 100 until `record_count` is zero. Version `v3` does not overwrite prior
+results.
+
+Do not use the applying form until migrations `20260731_05` and `20260803_11`
+have been reviewed and applied to the intended database.

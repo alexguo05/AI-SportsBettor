@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,8 @@ from src.db.models import (
     raw_ingest_objects,
 )
 from src.db.repository import raw_object_values
+from src.entity_bank.prompt import EXTRACTOR_VERSION
+from src.jobs.repository import RESOLVE_MARKET, enqueue_job
 
 POLYMARKET_CURSOR_SOURCE = "polymarket"
 POLYMARKET_CURSOR_STREAM = "gamma_nfl_events"
@@ -50,6 +53,7 @@ def event_values(record: dict[str, Any], ingest_run_id: str) -> dict[str, Any]:
         "event_id": record["event_id"],
         "slug": record.get("slug"),
         "ticker": record.get("ticker"),
+        "game_id": record.get("game_id"),
         "title": record["title"],
         "description": record.get("description"),
         "category": record.get("category"),
@@ -77,6 +81,8 @@ def market_values(record: dict[str, Any], ingest_run_id: str) -> dict[str, Any]:
         "condition_id": record.get("condition_id"),
         "slug": record.get("slug"),
         "question": record["question"],
+        "group_item_title": record.get("group_item_title"),
+        "group_item_threshold": record.get("group_item_threshold"),
         "sports_market_type": record.get("sports_market_type"),
         "line": record.get("line"),
         "active": record["active"],
@@ -128,6 +134,7 @@ class OddsRepository:
             )
             for event in envelope["records"]:
                 values = event_values(event, ingest_run_id)
+                event_market_hashes: list[str] = []
                 seen_event_ids.add(values["event_id"])
                 prior_hash = connection.scalar(
                     select(polymarket_event_versions.c.content_sha256)
@@ -159,6 +166,7 @@ class OddsRepository:
                                 for column in (
                                     polymarket_events.c.slug,
                                     polymarket_events.c.ticker,
+                                    polymarket_events.c.game_id,
                                     polymarket_events.c.title,
                                     polymarket_events.c.description,
                                     polymarket_events.c.category,
@@ -179,7 +187,11 @@ class OddsRepository:
                         },
                     )
                 )
-                if should_append_version(prior_hash, values["current_content_sha256"]):
+                event_needs_resolution = should_append_version(
+                    prior_hash,
+                    values["current_content_sha256"],
+                )
+                if event_needs_resolution:
                     connection.execute(
                         insert(polymarket_event_versions)
                         .values(
@@ -198,6 +210,7 @@ class OddsRepository:
 
                 for market in event["markets"]:
                     market_row = market_values(market, ingest_run_id)
+                    event_market_hashes.append(market_row["current_content_sha256"])
                     seen_market_ids.add(market_row["market_id"])
                     prior_market_hash = connection.scalar(
                         select(polymarket_market_versions.c.content_sha256)
@@ -238,6 +251,8 @@ class OddsRepository:
                                         polymarket_markets.c.condition_id,
                                         polymarket_markets.c.slug,
                                         polymarket_markets.c.question,
+                                        polymarket_markets.c.group_item_title,
+                                        polymarket_markets.c.group_item_threshold,
                                         polymarket_markets.c.sports_market_type,
                                         polymarket_markets.c.line,
                                         polymarket_markets.c.active,
@@ -256,10 +271,12 @@ class OddsRepository:
                             },
                         )
                     )
-                    if should_append_version(
+                    market_changed = should_append_version(
                         prior_market_hash,
                         market_row["current_content_sha256"],
-                    ):
+                    )
+                    event_needs_resolution = event_needs_resolution or market_changed
+                    if market_changed:
                         connection.execute(
                             insert(polymarket_market_versions)
                             .values(
@@ -321,6 +338,29 @@ class OddsRepository:
                                 },
                             )
                         )
+
+                if event_needs_resolution:
+                    resolution_digest = hashlib.sha256(
+                        "|".join(
+                            [
+                                values["current_content_sha256"],
+                                *sorted(event_market_hashes),
+                                EXTRACTOR_VERSION,
+                            ]
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    enqueue_job(
+                        connection,
+                        job_type=RESOLVE_MARKET,
+                        idempotency_key=(
+                            f"{values['event_id']}:{resolution_digest}"
+                        ),
+                        payload={
+                            "event_id": values["event_id"],
+                            "extractor_version": EXTRACTOR_VERSION,
+                        },
+                        priority=5,
+                    )
 
             if seen_event_ids:
                 connection.execute(

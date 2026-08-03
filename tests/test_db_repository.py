@@ -19,6 +19,8 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "news_media",
         "news_enrichments",
         "news_enrichment_tags",
+        "news_entity_resolution_runs",
+        "job_outbox",
         "ingest_cursors",
         "polymarket_events",
         "polymarket_event_versions",
@@ -26,6 +28,15 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "polymarket_market_versions",
         "polymarket_tokens",
         "polymarket_current_order_books",
+        "entity_bank_versions",
+        "entities",
+        "entity_aliases",
+        "entity_source_mappings",
+        "entity_roles",
+        "entity_relationships",
+        "entity_mentions",
+        "polymarket_market_classifications",
+        "entity_resolution_attempts",
     }
     assert metadata.tables["news_events"].primary_key.columns.keys() == ["news_id"]
     assert metadata.tables["news_media"].primary_key.columns.keys() == [
@@ -34,6 +45,8 @@ def test_ingestion_schema_contains_expected_tables() -> None:
     ]
     assert "missing_since" in metadata.tables["polymarket_events"].columns
     assert "missing_since" in metadata.tables["polymarket_markets"].columns
+    assert "game_id" in metadata.tables["polymarket_events"].columns
+    assert "group_item_title" in metadata.tables["polymarket_markets"].columns
     assert "last_structural_sha256" in metadata.tables["ingest_cursors"].columns
     assert metadata.tables["news_enrichments"].primary_key.columns.keys() == [
         "news_id",
@@ -43,11 +56,25 @@ def test_ingestion_schema_contains_expected_tables() -> None:
     tag_columns = metadata.tables["news_enrichment_tags"].columns.keys()
     assert "primary_tag" not in enrichment_columns
     assert "confidence" not in enrichment_columns
+    assert "entity_extractor_version" in enrichment_columns
+    assert "source_refs" in metadata.tables["entity_mentions"].columns
+    assert metadata.tables[
+        "news_entity_resolution_runs"
+    ].primary_key.columns.keys() == [
+        "news_id",
+        "enrichment_version",
+        "input_fingerprint",
+        "extractor_version",
+    ]
     assert "certainty" in tag_columns
     assert "confidence" not in tag_columns
     assert "polymarket_order_book_snapshots" not in metadata.tables
     assert "bids" in metadata.tables["polymarket_current_order_books"].columns
     assert "asks" in metadata.tables["polymarket_current_order_books"].columns
+    assert metadata.tables["job_outbox"].primary_key.columns.keys() == ["job_id"]
+    assert {"payload", "lease_expires_at", "max_attempts"} <= set(
+        metadata.tables["job_outbox"].columns.keys()
+    )
 
 
 def test_envelope_and_record_map_to_relational_rows() -> None:

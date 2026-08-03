@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from anthropic import Anthropic
+from pydantic import ValidationError
 
 from src.enrich_news.config import DEFAULT_MAX_OUTPUT_TOKENS, DEFAULT_MODEL_NAME
 from src.enrich_news.models import (
@@ -60,6 +61,27 @@ class ClaudeProvider:
         )
 
     def enrich(self, evidence: CollectedEvidence) -> ProviderResponse:
+        return self._enrich(evidence)
+
+    def repair(
+        self,
+        evidence: CollectedEvidence,
+        validation_feedback: str,
+    ) -> ProviderResponse:
+        correction = (
+            "\n\nThe previous extraction had invalid entity evidence. Regenerate the complete "
+            "answer, copying every entity evidence excerpt exactly from its cited source. Do not "
+            "combine separate passages or decode, paraphrase, summarize, or normalize the excerpt. "
+            f"Validation feedback: {validation_feedback[:4_000]}"
+        )
+        return self._enrich(evidence, system_addendum=correction)
+
+    def _enrich(
+        self,
+        evidence: CollectedEvidence,
+        *,
+        system_addendum: str = "",
+    ) -> ProviderResponse:
         content: list[dict[str, object]] = []
         for image in evidence.images[:20]:
             content.append(
@@ -84,13 +106,25 @@ class ClaudeProvider:
                 "text": build_user_prompt(evidence.as_prompt_text(), evidence.source_refs()),
             }
         )
-        response = self.client.messages.parse(
-            model=self.model_name,
-            max_tokens=self.max_tokens,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": content}],
-            output_format=EnrichmentOutput,
-        )
+        request = {
+            "model": self.model_name,
+            "max_tokens": self.max_tokens,
+            "messages": [{"role": "user", "content": content}],
+            "output_format": EnrichmentOutput,
+        }
+        system_prompt = SYSTEM_PROMPT + system_addendum
+        try:
+            response = self.client.messages.parse(system=system_prompt, **request)
+        except ValidationError as exc:
+            correction = (
+                "\n\nYour previous response failed output-schema validation. Regenerate the "
+                "complete answer from the supplied evidence and satisfy every schema limit. "
+                f"Validation error: {str(exc)[:4_000]}"
+            )
+            response = self.client.messages.parse(
+                system=system_prompt + correction,
+                **request,
+            )
         if response.parsed_output is None:
             raise RuntimeError(f"Claude returned no structured output ({response.stop_reason})")
         return ProviderResponse(

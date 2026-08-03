@@ -16,6 +16,7 @@ from src.db.models import (
     news_media,
 )
 from src.enrich_news.models import EnrichmentResult, NewsRecord
+from src.jobs.repository import RESOLVE_NEWS, enqueue_job
 
 
 def enrichment_values(
@@ -28,6 +29,7 @@ def enrichment_values(
     return {
         "news_id": result.news_id,
         "enrichment_version": result.enrichment_version,
+        "entity_extractor_version": result.entity_extractor_version,
         "provider": result.provider,
         "model_name": result.model_name,
         "status": result.status,
@@ -121,6 +123,49 @@ class EnrichmentRepository:
             for row in event_rows
         ]
 
+    def load_record(self, news_id: str) -> NewsRecord | None:
+        event_statement = select(
+            news_events.c.news_id,
+            news_events.c.text,
+            news_events.c.source_url,
+            news_events.c.author_username,
+            news_events.c.published_at,
+            news_events.c.source_entities,
+        ).where(news_events.c.news_id == news_id)
+        media_statement = select(news_media).where(news_media.c.news_id == news_id)
+        with self.resources.engine.connect() as connection:
+            event = connection.execute(event_statement).mappings().one_or_none()
+            if event is None:
+                return None
+            media = [
+                dict(row)
+                for row in connection.execute(media_statement).mappings().all()
+            ]
+        return NewsRecord(
+            news_id=str(event["news_id"]),
+            text=str(event["text"]),
+            source_url=event["source_url"],
+            author_username=event["author_username"],
+            published_at=event["published_at"].astimezone(UTC).isoformat(),
+            source_entities=event["source_entities"] or {},
+            media=media,
+        )
+
+    def has_completed(self, *, news_id: str, enrichment_version: str) -> bool:
+        statement = select(
+            exists(
+                select(news_enrichments.c.news_id).where(
+                    news_enrichments.c.news_id == news_id,
+                    news_enrichments.c.enrichment_version == enrichment_version,
+                    news_enrichments.c.status.in_(
+                        ("completed", "completed_with_warnings")
+                    ),
+                )
+            )
+        )
+        with self.resources.engine.connect() as connection:
+            return bool(connection.scalar(statement))
+
     def persist_result(self, result: EnrichmentResult) -> None:
         values = enrichment_values(result)
         with self.resources.engine.begin() as connection:
@@ -148,3 +193,20 @@ class EnrichmentRepository:
             tags = tag_values(result)
             if tags:
                 connection.execute(insert(news_enrichment_tags), tags)
+            if result.status.startswith("completed") and result.output is not None:
+                enqueue_job(
+                    connection,
+                    job_type=RESOLVE_NEWS,
+                    idempotency_key=(
+                        f"{result.news_id}:{result.enrichment_version}:"
+                        f"{result.input_fingerprint}:"
+                        f"{result.entity_extractor_version}"
+                    ),
+                    payload={
+                        "news_id": result.news_id,
+                        "enrichment_version": result.enrichment_version,
+                        "input_fingerprint": result.input_fingerprint,
+                        "extractor_version": result.entity_extractor_version,
+                    },
+                    priority=8,
+                )

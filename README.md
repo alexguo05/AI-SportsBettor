@@ -70,6 +70,41 @@ This collector discovers events, markets, and CLOB outcome token IDs. See
 [Polymarket ingestion and storage contract](docs/POLYMARKET_INGESTION.md) for
 the path convention, version-history behavior, and PostgreSQL mapping.
 
+### Auditing and Building the NFL Entity Bank
+
+```bash
+# Live nflverse + Gamma, local files only: no database or GCS reads/writes
+python -m src.entity_bank.audit --provider mock --event-limit 20
+
+# Use schema-constrained Claude output while still making no storage writes
+python -m src.entity_bank.audit --provider claude --event-limit 20
+
+# Preview the complete canonical nflverse registry as local JSONL
+python -m src.entity_bank.nflverse_sync --season 2026 --limit 100
+```
+
+The bank uses internal IDs, keeps nflverse/provider IDs as mappings, records
+ambiguous and unresolved mentions instead of guessing, and never treats a
+prediction or social claim as factual roster membership. See
+[NFL entity bank and source resolution](docs/ENTITY_BANK.md) for schema,
+dry-run outputs, explicit apply confirmations, and backfill order.
+
+### Running Real-Time Enrichment and Resolution
+
+```bash
+# Preview/seed rows created before the queue migration
+python -m src.jobs.seed
+
+# Continuously process new work with bounded concurrency
+python -m src.jobs.worker \
+  --concurrency 10 \
+  --confirm-live-writes RUN_JOB_WORKER
+```
+
+X, enrichment, and Gamma writes enqueue downstream work transactionally.
+Leases, idempotency keys, and retries make the queue safe across process or VM
+restarts. See [durable enrichment and entity worker](docs/JOB_QUEUE.md).
+
 ## 📁 Project Structure
 
 ```
@@ -112,7 +147,7 @@ AI-SportsBettor/
 - [ ] APScheduler automation
 
 ### Week 2+
-- [ ] Team/entity normalization
+- [x] NFL entity bank and auditable source resolution
 - [x] Polymarket Gamma event discovery
 - [x] Polymarket CLOB order-book ingestion
 - [ ] News-to-market linking
@@ -137,7 +172,9 @@ X API → Versioned raw envelope + media in GCS
                          ↓
           raw_ingest_objects / news_events / news_media
                          ↓
-                  Entity Resolution
+       Multimodal enrichment + one-pass mention extraction
+                         ↓
+           Canonical entity candidate resolution
                          ↓
               Polymarket Integration
                          ↓
