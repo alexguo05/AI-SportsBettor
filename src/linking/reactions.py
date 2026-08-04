@@ -35,7 +35,7 @@ from src.db.models import (
     raw_ingest_objects,
 )
 
-LABEL_VERSION = "midpoint_reaction_v1"
+LABEL_VERSION = "midpoint_reaction_v2"
 HORIZONS: tuple[tuple[str, int], ...] = (
     ("plus_1m", 60),
     ("plus_5m", 300),
@@ -56,7 +56,9 @@ def utc_now() -> datetime:
 
 
 class EnvelopeReaderProtocol(Protocol):
-    def fetch_midpoints(self, ingest_run_id: str, storage_uri: str) -> dict[str, str | None]: ...
+    def fetch_books(
+        self, ingest_run_id: str, storage_uri: str
+    ) -> dict[str, dict[str, str | None]]: ...
 
 
 class GcsEnvelopeReader:
@@ -65,9 +67,11 @@ class GcsEnvelopeReader:
     def __init__(self, *, src_dir: Path, cache_size: int = ENVELOPE_CACHE_SIZE) -> None:
         self.client = create_gcs_client(src_dir)
         self.cache_size = cache_size
-        self._cache: OrderedDict[str, dict[str, str | None]] = OrderedDict()
+        self._cache: OrderedDict[str, dict[str, dict[str, str | None]]] = OrderedDict()
 
-    def fetch_midpoints(self, ingest_run_id: str, storage_uri: str) -> dict[str, str | None]:
+    def fetch_books(
+        self, ingest_run_id: str, storage_uri: str
+    ) -> dict[str, dict[str, str | None]]:
         cached = self._cache.get(ingest_run_id)
         if cached is not None:
             self._cache.move_to_end(ingest_run_id)
@@ -79,14 +83,19 @@ class GcsEnvelopeReader:
         if raw[:2] == b"\x1f\x8b":
             raw = gzip.decompress(raw)
         envelope = json.loads(raw)
-        midpoints = {
-            record["token_id"]: record.get("midpoint")
+        books = {
+            record["token_id"]: {
+                "midpoint": record.get("midpoint"),
+                "spread": record.get("spread"),
+                "bid_depth": record.get("bid_captured_notional"),
+                "ask_depth": record.get("ask_captured_notional"),
+            }
             for record in envelope.get("records", [])
         }
-        self._cache[ingest_run_id] = midpoints
+        self._cache[ingest_run_id] = books
         while len(self._cache) > self.cache_size:
             self._cache.popitem(last=False)
-        return midpoints
+        return books
 
 
 def select_envelopes(
@@ -139,20 +148,21 @@ def coverage_stats(
     return len(timestamps), Decimal(str(max_gap))
 
 
-def _midpoint(
+def _decimal_or_none(value: Any) -> Decimal | None:
+    return Decimal(str(value)) if value is not None else None
+
+
+def _book(
     envelope_item: dict[str, Any] | None,
     token_id: str,
     reader: EnvelopeReaderProtocol,
-) -> tuple[Decimal | None, datetime | None]:
+) -> tuple[dict[str, str | None] | None, datetime | None]:
     if envelope_item is None:
         return None, None
-    midpoints = reader.fetch_midpoints(
+    books = reader.fetch_books(
         envelope_item["ingest_run_id"], envelope_item["storage_uri"]
     )
-    value = midpoints.get(token_id)
-    if value is None:
-        return None, envelope_item["ingested_at"]
-    return Decimal(str(value)), envelope_item["ingested_at"]
+    return books.get(token_id), envelope_item["ingested_at"]
 
 
 def build_reaction_rows(
@@ -175,8 +185,9 @@ def build_reaction_rows(
     rows: list[dict[str, Any]] = []
     for token in tokens:
         token_id = token["token_id"]
-        baseline_midpoint, baseline_observed_at = _midpoint(
-            chosen["baseline"], token_id, reader
+        baseline_book, baseline_observed_at = _book(chosen["baseline"], token_id, reader)
+        baseline_midpoint = (
+            _decimal_or_none(baseline_book.get("midpoint")) if baseline_book else None
         )
         row: dict[str, Any] = {
             "news_id": link["news_id"],
@@ -187,12 +198,22 @@ def build_reaction_rows(
             "published_at": published_at,
             "baseline_midpoint": baseline_midpoint,
             "baseline_observed_at": baseline_observed_at,
+            "baseline_spread": (
+                _decimal_or_none(baseline_book.get("spread")) if baseline_book else None
+            ),
+            "baseline_bid_depth": (
+                _decimal_or_none(baseline_book.get("bid_depth")) if baseline_book else None
+            ),
+            "baseline_ask_depth": (
+                _decimal_or_none(baseline_book.get("ask_depth")) if baseline_book else None
+            ),
             "snapshot_count": snapshot_count,
             "max_gap_seconds": max_gap,
             "computed_at": computed_at,
         }
         for name, _offset in HORIZONS:
-            midpoint, _observed = _midpoint(chosen[name], token_id, reader)
+            book, _observed = _book(chosen[name], token_id, reader)
+            midpoint = _decimal_or_none(book.get("midpoint")) if book else None
             row[f"midpoint_{name}"] = midpoint
             row[f"delta_{name}"] = (
                 midpoint - baseline_midpoint

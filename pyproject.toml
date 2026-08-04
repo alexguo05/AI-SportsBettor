@@ -38,6 +38,7 @@ job-worker = "src.jobs.worker:main"
 link-news-markets = "src.linking.linker:main"
 build-reaction-labels = "src.linking.reactions:main"
 export-training-dataset = "src.linking.export_dataset:main"
+label-training-dataset = "src.linking.labels:main"
 
 [project.optional-dependencies]
 dev = [

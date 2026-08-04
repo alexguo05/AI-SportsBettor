@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.dialects import postgresql
 
 from src.linking.export_dataset import build_dataset_rows
+from src.linking.labels import BucketRule, bucket_label, rule_column_name
 from src.linking.linker import (
     LINKER_VERSION,
     LinkerRepository,
@@ -263,14 +264,31 @@ def test_coverage_stats_report_gaps_including_window_edges() -> None:
     assert empty_gap is None
 
 
+def book(
+    midpoint: str | None,
+    *,
+    spread: str | None = "0.02",
+    bid_depth: str | None = "500",
+    ask_depth: str | None = "500",
+) -> dict[str, str | None]:
+    return {
+        "midpoint": midpoint,
+        "spread": spread,
+        "bid_depth": bid_depth,
+        "ask_depth": ask_depth,
+    }
+
+
 class FakeReader:
-    def __init__(self, midpoints: dict[str, dict[str, str | None]]) -> None:
-        self.midpoints = midpoints
+    def __init__(self, books: dict[str, dict[str, dict[str, str | None]]]) -> None:
+        self.books = books
         self.fetches: list[str] = []
 
-    def fetch_midpoints(self, ingest_run_id: str, _storage_uri: str) -> dict[str, str | None]:
+    def fetch_books(
+        self, ingest_run_id: str, _storage_uri: str
+    ) -> dict[str, dict[str, str | None]]:
         self.fetches.append(ingest_run_id)
-        return self.midpoints[ingest_run_id]
+        return self.books[ingest_run_id]
 
 
 def test_reaction_rows_compute_deltas_and_coverage() -> None:
@@ -285,8 +303,11 @@ def test_reaction_rows_compute_deltas_and_coverage() -> None:
     ]
     reader = FakeReader(
         {
-            "baseline": {"t-yes": "0.40", "t-no": "0.60"},
-            "plus-1m": {"t-yes": "0.55"},
+            "baseline": {
+                "t-yes": book("0.40", spread="0.01", bid_depth="350", ask_depth="410"),
+                "t-no": book("0.60"),
+            },
+            "plus-1m": {"t-yes": book("0.55")},
         }
     )
 
@@ -303,6 +324,9 @@ def test_reaction_rows_compute_deltas_and_coverage() -> None:
     yes_row = rows[0]
     assert yes_row["label_version"] == LABEL_VERSION
     assert yes_row["baseline_midpoint"] == Decimal("0.40")
+    assert yes_row["baseline_spread"] == Decimal("0.01")
+    assert yes_row["baseline_bid_depth"] == Decimal("350")
+    assert yes_row["baseline_ask_depth"] == Decimal("410")
     assert yes_row["midpoint_plus_1m"] == Decimal("0.55")
     assert yes_row["delta_plus_1m"] == Decimal("0.15")
     assert yes_row["midpoint_plus_2h"] is None
@@ -332,6 +356,8 @@ def test_reaction_rows_leave_trades_null_when_not_collected() -> None:
     assert row["trade_count"] is None
     assert row["trade_notional"] is None
     assert row["baseline_midpoint"] is None
+    assert row["baseline_spread"] is None
+    assert row["baseline_bid_depth"] is None
     assert row["snapshot_count"] == 0
 
 
@@ -371,14 +397,31 @@ def _reader_with_payload(payload: bytes) -> tuple[GcsEnvelopeReader, FakeStorage
 
 
 def test_envelope_reader_handles_gzip_and_transcoded_payloads_with_cache() -> None:
-    envelope = {"records": [{"token_id": "t-yes", "midpoint": "0.42"}]}
+    envelope = {
+        "records": [
+            {
+                "token_id": "t-yes",
+                "midpoint": "0.42",
+                "spread": "0.04",
+                "bid_captured_notional": "812.5",
+                "ask_captured_notional": "233",
+            }
+        ]
+    }
     encoded = json.dumps(envelope).encode("utf-8")
 
     for payload in (gzip.compress(encoded), encoded):
         reader, client = _reader_with_payload(payload)
-        midpoints = reader.fetch_midpoints("run-1", "gs://bucket/path.json.gz")
-        assert midpoints == {"t-yes": "0.42"}
-        assert reader.fetch_midpoints("run-1", "gs://bucket/path.json.gz") == midpoints
+        books = reader.fetch_books("run-1", "gs://bucket/path.json.gz")
+        assert books == {
+            "t-yes": {
+                "midpoint": "0.42",
+                "spread": "0.04",
+                "bid_depth": "812.5",
+                "ask_depth": "233",
+            }
+        }
+        assert reader.fetch_books("run-1", "gs://bucket/path.json.gz") == books
         assert client.downloads == 1
 
 
@@ -433,6 +476,9 @@ def test_dataset_rows_flatten_values_and_derive_outcome_won() -> None:
             "label_version": LABEL_VERSION,
             "baseline_midpoint": Decimal("0.40"),
             "baseline_observed_at": NOW - timedelta(seconds=15),
+            "baseline_spread": Decimal("0.02"),
+            "baseline_bid_depth": Decimal("350"),
+            "baseline_ask_depth": Decimal("410.5"),
             "midpoint_plus_1m": Decimal("0.55"),
             "midpoint_plus_5m": None,
             "midpoint_plus_30m": None,
@@ -463,6 +509,8 @@ def test_dataset_rows_flatten_values_and_derive_outcome_won() -> None:
     assert len(dataset) == 1
     row = dataset[0]
     assert row["baseline_midpoint"] == 0.40
+    assert row["baseline_spread"] == 0.02
+    assert row["baseline_ask_depth"] == 410.5
     assert row["delta_plus_1m"] == 0.15
     assert row["trade_notional"] == 120.5
     assert row["outcome_won"] is True
@@ -475,3 +523,86 @@ def test_dataset_rows_flatten_values_and_derive_outcome_won() -> None:
         [{**rows[0], "winning_outcome_index": None}], enrichments
     )
     assert dataset_unresolved[0]["outcome_won"] is None
+
+
+def label(
+    delta: float | None,
+    *,
+    trade_count: int | None = 5,
+    trade_notional: float | None = 250.0,
+    spread: float | None = 0.02,
+    bid_depth: float | None = 500.0,
+    ask_depth: float | None = 500.0,
+    rule: BucketRule = BucketRule(),
+) -> str | None:
+    """bucket_label with a healthy, well-traded book unless overridden."""
+    return bucket_label(
+        delta,
+        trade_count=trade_count,
+        trade_notional=trade_notional,
+        spread=spread,
+        bid_depth=bid_depth,
+        ask_depth=ask_depth,
+        rule=rule,
+    )
+
+
+def test_bucket_label_classifies_confirmed_moves_on_healthy_books() -> None:
+    assert label(0.05) == "up"
+    assert label(-0.05) == "down"
+    assert label(0.005) == "flat"
+    # Exactly at the threshold counts as a move.
+    assert label(0.02) == "up"
+    # No price coverage: unlabeled.
+    assert label(None) is None
+
+
+def test_bucket_label_gates_on_book_quality() -> None:
+    # Wide spread: the midpoint is not a price, row is unlabeled.
+    assert label(0.05, spread=0.30) is None
+    assert label(0.05, spread=None) is None
+    # Thin or one-sided book: unlabeled.
+    assert label(0.05, bid_depth=20.0) is None
+    assert label(0.05, ask_depth=None) is None
+    # A move inside half the spread is quote noise, not a move.
+    assert label(0.024, spread=0.05) == "flat"
+    # Gate off: the same rows label by delta and trades alone.
+    ungated = BucketRule(book_quality=False)
+    assert label(0.05, spread=0.30, rule=ungated) == "up"
+    assert label(0.05, spread=None, bid_depth=None, ask_depth=None, rule=ungated) == "up"
+
+
+def test_bucket_label_requires_real_executed_volume() -> None:
+    # A single tiny trade repricing the book is not a market reaction.
+    assert label(0.25, trade_count=1, trade_notional=5.0) == "flat"
+    assert label(0.25, trade_count=3, trade_notional=20.0) == "flat"
+    assert label(0.25, trade_count=2, trade_notional=80.0) == "up"
+    # Trades unknown (window predates collection): unknowable.
+    assert label(0.25, trade_count=None, trade_notional=None) is None
+    # Small move with unknown trades is still flat (no confirmation needed).
+    assert label(0.005, trade_count=None, trade_notional=None) == "flat"
+    # With confirmation off, volume is ignored.
+    raw = BucketRule(trade_confirmed=False)
+    assert label(0.25, trade_count=None, trade_notional=None, rule=raw) == "up"
+    assert label(-0.25, trade_count=1, trade_notional=5.0, rule=raw) == "down"
+
+
+def test_bucket_label_respects_threshold_knob() -> None:
+    assert label(0.015, rule=BucketRule(threshold_cents=Decimal("1"))) == "up"
+    assert label(0.015, rule=BucketRule(threshold_cents=Decimal("2"))) == "flat"
+    assert label(-0.04, rule=BucketRule(threshold_cents=Decimal("5"))) == "flat"
+
+
+def test_rule_column_names_are_stable() -> None:
+    assert rule_column_name(BucketRule()) == "target_plus_30m_2c_tc"
+    assert (
+        rule_column_name(
+            BucketRule(
+                horizon="plus_2h",
+                threshold_cents=Decimal("5"),
+                trade_confirmed=False,
+                book_quality=False,
+            )
+        )
+        == "target_plus_2h_5c_raw_nobook"
+    )

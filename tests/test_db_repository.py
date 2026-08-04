@@ -88,6 +88,9 @@ def test_ingestion_schema_contains_expected_tables() -> None:
     assert "market_open_at_publish" in metadata.tables["news_market_links"].columns
     assert "snapshot_count" in metadata.tables["news_market_reactions"].columns
     assert "max_gap_seconds" in metadata.tables["news_market_reactions"].columns
+    assert {"baseline_spread", "baseline_bid_depth", "baseline_ask_depth"} <= set(
+        metadata.tables["news_market_reactions"].columns.keys()
+    )
     assert metadata.tables["job_outbox"].primary_key.columns.keys() == ["job_id"]
     assert {"payload", "lease_expires_at", "max_attempts"} <= set(
         metadata.tables["job_outbox"].columns.keys()

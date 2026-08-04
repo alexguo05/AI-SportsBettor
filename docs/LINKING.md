@@ -60,7 +60,7 @@ collected. The run checkpoint lives in `ingest_cursors` under
 
 Builds price-reaction labels for links whose post-publish window has fully
 elapsed and which have no rows at the current `label_version`
-(`midpoint_reaction_v1`).
+(`midpoint_reaction_v2`).
 
 For each linked tweet it selects order-book envelopes from the
 `raw_ingest_objects` index:
@@ -74,7 +74,11 @@ For each linked tweet it selects order-book envelopes from the
 Only those chosen envelopes are downloaded from GCS (at most five per
 tweet, LRU-cached across the run), never the full window. Midpoints are
 extracted per outcome token and stored with deltas against the baseline in
-`news_market_reactions`.
+`news_market_reactions`. The baseline snapshot also contributes book
+quality per token — `baseline_spread` and `baseline_bid_depth` /
+`baseline_ask_depth` (executable notional per side) — because a midpoint
+on a near-empty book is not a real price and labels must be able to
+exclude it.
 
 Trust signals per row instead of failures:
 
@@ -102,6 +106,45 @@ and parquet under `data/local/datasets/` by default.
   schema stays flat.
 - `outcome_won` is derived from `winning_outcome_index` when the market has
   resolved; NULL otherwise.
+
+## 4. Label buckets (`python -m src.linking.labels`)
+
+Turns the raw deltas in an export into the classification target
+(`up` / `down` / `flat`). Buckets are a formula over stored midpoints, not
+data — rerunning with different knobs rebuilds every label in seconds, so
+sweeping is the expected workflow.
+
+Rule, per row:
+
+- Book-quality gate: baseline spread must be known and at most
+  `--max-spread-cents` (default 5), and each side of the baseline book
+  must hold at least `--min-depth` USD (default 100) — otherwise the
+  midpoint is not a real price and the row is unlabeled. Disable with
+  `--no-book-quality` (required for pre-v2 exports).
+- No delta at the horizon (no price coverage) → unlabeled.
+- |delta| below the threshold, or inside half the baseline spread
+  (quote noise by construction) → `flat`.
+- Otherwise `up`/`down` by sign, **if** the window contains at least
+  `--min-trades` trades (default 2) and `--min-trade-notional` USD of
+  executed volume (default 50). Less than that → `flat` (a single tiny
+  trade repricing a dead book is not a market reaction); unknown trades
+  (window predates trade collection) → unlabeled.
+
+Usage:
+
+```
+label-training-dataset                          # +30m, 2c, gated -> adds `target`
+label-training-dataset --horizon plus_2h --threshold-cents 5
+label-training-dataset --min-trade-notional 100 --min-depth 250
+label-training-dataset --no-trade-confirmation --no-book-quality
+label-training-dataset --sweep                  # all horizon x 1c/2c/5c combos
+```
+
+Reads the newest `tweet_market_dataset_*.parquet` in `data/local/datasets/`
+unless `--input` is given, writes `<input>_labeled.parquet`, and prints the
+class balance per rule — paste that into the research log
+(`docs/experiments/`). Sweep columns are named
+`target_<horizon>_<cents>c_<tc|raw>`, e.g. `target_plus_30m_2c_tc`.
 
 ## Versioning and rebuilds
 
