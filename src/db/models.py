@@ -649,6 +649,80 @@ news_enrichment_tags = Table(
 )
 Index("ix_news_enrichment_tags_tag", news_enrichment_tags.c.tag)
 
+news_market_links = Table(
+    "news_market_links",
+    metadata,
+    Column(
+        "news_id",
+        String(128),
+        ForeignKey("news_events.news_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "market_id",
+        String(128),
+        ForeignKey("polymarket_markets.market_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "event_id",
+        String(128),
+        ForeignKey("polymarket_events.event_id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("published_at", DateTime(timezone=True), nullable=False),
+    Column("shared_entity_ids", JSONB, nullable=False),
+    Column("shared_entity_count", Integer, nullable=False),
+    Column("news_mention_roles", JSONB, nullable=False),
+    Column("market_mention_roles", JSONB, nullable=False),
+    Column("market_topic", String(64)),
+    Column("contract_type", String(32)),
+    Column("market_open_at_publish", Boolean, nullable=False),
+    Column("linker_version", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+Index("ix_news_market_links_market_id", news_market_links.c.market_id)
+Index("ix_news_market_links_published_at", news_market_links.c.published_at)
+
+news_market_reactions = Table(
+    "news_market_reactions",
+    metadata,
+    Column("news_id", String(128), primary_key=True),
+    Column("market_id", String(128), primary_key=True),
+    Column(
+        "token_id",
+        String(128),
+        ForeignKey("polymarket_tokens.token_id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("label_version", String(64), primary_key=True),
+    Column("outcome_index", Integer),
+    Column("published_at", DateTime(timezone=True), nullable=False),
+    Column("baseline_midpoint", Numeric),
+    Column("baseline_observed_at", DateTime(timezone=True)),
+    Column("midpoint_plus_1m", Numeric),
+    Column("midpoint_plus_5m", Numeric),
+    Column("midpoint_plus_30m", Numeric),
+    Column("midpoint_plus_2h", Numeric),
+    Column("delta_plus_1m", Numeric),
+    Column("delta_plus_5m", Numeric),
+    Column("delta_plus_30m", Numeric),
+    Column("delta_plus_2h", Numeric),
+    Column("trade_count", Integer),
+    Column("trade_notional", Numeric),
+    Column("snapshot_count", Integer, nullable=False),
+    Column("max_gap_seconds", Numeric),
+    Column("computed_at", DateTime(timezone=True), nullable=False),
+    ForeignKeyConstraint(
+        ["news_id", "market_id"],
+        ["news_market_links.news_id", "news_market_links.market_id"],
+        ondelete="CASCADE",
+    ),
+)
+Index("ix_news_market_reactions_market_id", news_market_reactions.c.market_id)
+Index("ix_news_market_reactions_published_at", news_market_reactions.c.published_at)
+
 job_outbox = Table(
     "job_outbox",
     metadata,

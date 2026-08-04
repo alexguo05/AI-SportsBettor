@@ -38,6 +38,8 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "entity_mentions",
         "polymarket_market_classifications",
         "entity_resolution_attempts",
+        "news_market_links",
+        "news_market_reactions",
     }
     assert metadata.tables["news_events"].primary_key.columns.keys() == ["news_id"]
     assert metadata.tables["news_media"].primary_key.columns.keys() == [
@@ -72,6 +74,20 @@ def test_ingestion_schema_contains_expected_tables() -> None:
     assert "polymarket_order_book_snapshots" not in metadata.tables
     assert "bids" in metadata.tables["polymarket_current_order_books"].columns
     assert "asks" in metadata.tables["polymarket_current_order_books"].columns
+    assert metadata.tables["news_market_links"].primary_key.columns.keys() == [
+        "news_id",
+        "market_id",
+    ]
+    assert metadata.tables["news_market_reactions"].primary_key.columns.keys() == [
+        "news_id",
+        "market_id",
+        "token_id",
+        "label_version",
+    ]
+    assert "shared_entity_ids" in metadata.tables["news_market_links"].columns
+    assert "market_open_at_publish" in metadata.tables["news_market_links"].columns
+    assert "snapshot_count" in metadata.tables["news_market_reactions"].columns
+    assert "max_gap_seconds" in metadata.tables["news_market_reactions"].columns
     assert metadata.tables["job_outbox"].primary_key.columns.keys() == ["job_id"]
     assert {"payload", "lease_expires_at", "max_attempts"} <= set(
         metadata.tables["job_outbox"].columns.keys()

@@ -12,6 +12,7 @@ dependencies = [
     "Pillow>=12.3.0,<13",
     "python-dateutil>=2.9.0",
     "pandas>=2.2.0",
+    "pyarrow>=17.0.0",
     "pydantic>=2.7.0",
     "pydantic-settings>=2.2.0",
     "sqlalchemy>=2.0.30",
@@ -34,6 +35,9 @@ entity-bank-resolve = "src.entity_bank.worker:main"
 entity-bank-audit = "src.entity_bank.audit:main"
 job-queue-seed = "src.jobs.seed:main"
 job-worker = "src.jobs.worker:main"
+link-news-markets = "src.linking.linker:main"
+build-reaction-labels = "src.linking.reactions:main"
+export-training-dataset = "src.linking.export_dataset:main"
 
 [project.optional-dependencies]
 dev = [

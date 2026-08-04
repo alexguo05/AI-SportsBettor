@@ -74,11 +74,16 @@ The complete production service set is:
 - `polymarket-resolutions.service`
   - Reconciles settlement outcomes for markets that left the open Gamma feed.
   - Normal cycle interval: 1 hour.
-  - Added August 4; not yet deployed at the last documentation update.
+  - Deployed August 4.
 - `polymarket-trades.service`
   - Pulls executed trade prints from the public data API.
   - Normal cycle interval: 60 seconds.
-  - Added August 4; not yet deployed at the last documentation update.
+  - Deployed August 4.
+- `news-market-linking.service` + `news-market-linking.timer`
+  - Oneshot batch triggered hourly by the timer (not a long-running poller).
+  - Rebuilds tweet-market links, then labels links whose two-hour reaction
+    window has elapsed. See `docs/LINKING.md`.
+  - Deployed August 4.
 - `job-worker.service`
   - Processes enrichment and entity-resolution jobs.
   - Uses 10 worker threads, 2 video slots, and 5 market-event slots.
