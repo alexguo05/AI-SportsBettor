@@ -11,5 +11,14 @@
   "clob_order_book_depth_usdc": 10000,
   "clob_order_book_batch_size": 500,
   "clob_order_book_timeout_seconds": 30,
-  "clob_order_book_max_attempts": 5
+  "clob_order_book_max_attempts": 5,
+  "resolution_poll_interval_seconds": 3600,
+  "resolution_batch_size": 20,
+  "resolution_max_event_age_days": 45,
+  "trades_poll_interval_seconds": 60,
+  "trades_market_batch_size": 20,
+  "trades_page_limit": 500,
+  "trades_max_pages_per_batch": 10,
+  "trades_overlap_seconds": 120,
+  "trades_initial_lookback_hours": 24
 }

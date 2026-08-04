@@ -28,6 +28,7 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "polymarket_market_versions",
         "polymarket_tokens",
         "polymarket_current_order_books",
+        "polymarket_trades",
         "entity_bank_versions",
         "entities",
         "entity_aliases",

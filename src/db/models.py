@@ -192,6 +192,11 @@ polymarket_markets = Table(
     Column("closed", Boolean, nullable=False),
     Column("accepting_orders", Boolean, nullable=False),
     Column("enable_order_book", Boolean, nullable=False),
+    Column("outcome_prices", JSONB),
+    Column("uma_resolution_status", String(64)),
+    Column("winning_outcome_index", Integer),
+    Column("closed_time", DateTime(timezone=True)),
+    Column("resolution_observed_at", DateTime(timezone=True)),
     Column(
         "latest_raw_ingest_run_id",
         String(32),
@@ -206,6 +211,43 @@ polymarket_markets = Table(
 Index("ix_polymarket_markets_event_id", polymarket_markets.c.event_id)
 Index("ix_polymarket_markets_closed", polymarket_markets.c.closed)
 Index("ix_polymarket_markets_condition_id", polymarket_markets.c.condition_id)
+Index(
+    "ix_polymarket_markets_uma_resolution_status",
+    polymarket_markets.c.uma_resolution_status,
+)
+
+# Trades reference tokens the collector already knows, but no foreign key is
+# enforced: a provider-side token mismatch must not reject an entire archived
+# trade batch.
+polymarket_trades = Table(
+    "polymarket_trades",
+    metadata,
+    Column("trade_uid", String(64), primary_key=True),
+    Column("token_id", String(128), nullable=False),
+    Column("condition_id", String(128), nullable=False),
+    Column("side", String(8), nullable=False),
+    Column("outcome", Text),
+    Column("outcome_index", Integer),
+    Column("price", Numeric, nullable=False),
+    Column("size", Numeric, nullable=False),
+    Column("traded_at", DateTime(timezone=True), nullable=False),
+    Column("transaction_hash", String(80)),
+    Column("proxy_wallet", String(64)),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+)
+Index(
+    "ix_polymarket_trades_token_traded_at",
+    polymarket_trades.c.token_id,
+    polymarket_trades.c.traded_at,
+)
+Index("ix_polymarket_trades_condition_id", polymarket_trades.c.condition_id)
+Index("ix_polymarket_trades_traded_at", polymarket_trades.c.traded_at)
 
 polymarket_market_versions = Table(
     "polymarket_market_versions",

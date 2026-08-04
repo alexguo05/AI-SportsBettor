@@ -13,6 +13,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -364,6 +365,23 @@ class GammaClient:
         )
 
 
+def derive_winning_outcome_index(
+    uma_resolution_status: str | None,
+    outcome_prices: list[str],
+) -> int | None:
+    """Return the resolved outcome index only for an unambiguous 1/0 settlement."""
+    if uma_resolution_status != "resolved":
+        return None
+    winners = []
+    for index, price in enumerate(outcome_prices):
+        try:
+            if Decimal(price) == 1:
+                winners.append(index)
+        except (InvalidOperation, ValueError):
+            return None
+    return winners[0] if len(winners) == 1 else None
+
+
 def normalize_market(
     event_id: str,
     payload: dict[str, Any],
@@ -376,6 +394,12 @@ def normalize_market(
     structural_state = _market_structural_projection(payload)
     outcomes = _json_list(payload.get("outcomes"))
     token_ids = _json_list(payload.get("clobTokenIds"))
+    outcome_prices = [str(value) for value in _json_list(payload.get("outcomePrices"))]
+    uma_resolution_status = (
+        str(payload["umaResolutionStatus"])
+        if payload.get("umaResolutionStatus") not in (None, "")
+        else None
+    )
     tokens = [
         {
             "token_id": str(token_id),
@@ -405,6 +429,13 @@ def normalize_market(
         "closed": bool(payload.get("closed", False)),
         "accepting_orders": bool(payload.get("acceptingOrders", False)),
         "enable_order_book": bool(payload.get("enableOrderBook", False)),
+        "outcome_prices": outcome_prices,
+        "uma_resolution_status": uma_resolution_status,
+        "winning_outcome_index": derive_winning_outcome_index(
+            uma_resolution_status,
+            outcome_prices,
+        ),
+        "closed_time": parse_timestamp(payload.get("closedTime")),
         "observed_at": observed_at.isoformat(),
         "content_sha256": content_sha256(structural_state),
         "tokens": tokens,

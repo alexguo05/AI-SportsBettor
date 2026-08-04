@@ -8,7 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from src.db.engine import DatabaseResources, create_database_resources
@@ -20,6 +20,7 @@ from src.db.models import (
     polymarket_market_versions,
     polymarket_markets,
     polymarket_tokens,
+    polymarket_trades,
     raw_ingest_objects,
 )
 from src.db.repository import raw_object_values
@@ -28,6 +29,8 @@ from src.jobs.repository import RESOLVE_MARKET, enqueue_job
 
 POLYMARKET_CURSOR_SOURCE = "polymarket"
 POLYMARKET_CURSOR_STREAM = "gamma_nfl_events"
+RESOLUTION_CURSOR_STREAM = "gamma_event_resolutions"
+TRADES_CURSOR_STREAM = "data_api_trades"
 
 
 def should_append_version(prior_hash: str | None, new_hash: str) -> bool:
@@ -94,6 +97,25 @@ def market_values(record: dict[str, Any], ingest_run_id: str) -> dict[str, Any]:
         "first_observed_at": observed_at,
         "last_observed_at": observed_at,
     }
+
+
+def market_resolution_values(record: dict[str, Any], ingest_run_id: str) -> dict[str, Any]:
+    values = market_values(record, ingest_run_id)
+    observed_at = values["last_observed_at"]
+    values.update(
+        {
+            "outcome_prices": record.get("outcome_prices") or [],
+            "uma_resolution_status": record.get("uma_resolution_status"),
+            "winning_outcome_index": record.get("winning_outcome_index"),
+            "closed_time": (
+                _timestamp(record["closed_time"], "market.closed_time")
+                if record.get("closed_time")
+                else None
+            ),
+            "resolution_observed_at": observed_at,
+        }
+    )
+    return values
 
 
 class OddsRepository:
@@ -555,6 +577,386 @@ class OrderBookRepository:
                     set_={
                         "query_fingerprint": cursor_insert.excluded.query_fingerprint,
                         "since_id": cursor_insert.excluded.since_id,
+                        "updated_at": cursor_insert.excluded.updated_at,
+                        "last_successful_poll_at": (
+                            cursor_insert.excluded.last_successful_poll_at
+                        ),
+                    },
+                    where=(
+                        cursor_insert.excluded.last_successful_poll_at
+                        >= ingest_cursors.c.last_successful_poll_at
+                    ),
+                )
+            )
+
+
+class TradesRepository:
+    """Append-only persistence for executed Polymarket trades."""
+
+    def __init__(self, resources: DatabaseResources) -> None:
+        self.resources = resources
+
+    @classmethod
+    def from_environment(cls, src_dir: Path) -> TradesRepository:
+        return cls(create_database_resources(src_dir))
+
+    def close(self) -> None:
+        self.resources.close()
+
+    def load_checkpoint(self) -> dict[str, Any]:
+        with self.resources.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    ingest_cursors.select().where(
+                        ingest_cursors.c.source == POLYMARKET_CURSOR_SOURCE,
+                        ingest_cursors.c.stream == TRADES_CURSOR_STREAM,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return dict(row) if row else {}
+
+    def load_open_condition_ids(self, *, missing_cutoff: datetime) -> list[str]:
+        """Order-book markets in the open feed, plus a grace window after they
+        disappear so the final trades before close are still collected."""
+        with self.resources.engine.connect() as connection:
+            rows = connection.execute(
+                select(polymarket_markets.c.condition_id)
+                .where(
+                    polymarket_markets.c.condition_id.is_not(None),
+                    polymarket_markets.c.enable_order_book.is_(True),
+                    or_(
+                        polymarket_markets.c.missing_since.is_(None),
+                        polymarket_markets.c.missing_since > missing_cutoff,
+                    ),
+                )
+                .distinct()
+                .order_by(polymarket_markets.c.condition_id)
+            )
+            return [str(row.condition_id) for row in rows]
+
+    def persist_records(self, envelope: dict[str, Any]) -> None:
+        rows: list[dict[str, Any]] = []
+        for record in envelope["records"]:
+            rows.append(
+                {
+                    "trade_uid": record["trade_uid"],
+                    "token_id": record["token_id"],
+                    "condition_id": record["condition_id"],
+                    "side": record["side"],
+                    "outcome": record["outcome"],
+                    "outcome_index": record["outcome_index"],
+                    "price": Decimal(record["price"]),
+                    "size": Decimal(record["size"]),
+                    "traded_at": _timestamp(record["traded_at"], "trade.traded_at"),
+                    "transaction_hash": record["transaction_hash"],
+                    "proxy_wallet": record["proxy_wallet"],
+                    "raw_ingest_run_id": envelope["ingest_run_id"],
+                    "observed_at": _timestamp(record["observed_at"], "trade.observed_at"),
+                }
+            )
+        with self.resources.engine.begin() as connection:
+            connection.execute(
+                insert(raw_ingest_objects)
+                .values(**raw_object_values(envelope))
+                .on_conflict_do_nothing(index_elements=[raw_ingest_objects.c.ingest_run_id])
+            )
+            for offset in range(0, len(rows), 500):
+                connection.execute(
+                    insert(polymarket_trades)
+                    .values(rows[offset : offset + 500])
+                    .on_conflict_do_nothing(
+                        index_elements=[polymarket_trades.c.trade_uid]
+                    )
+                )
+
+    def finalize_cycle(self, checkpoint: dict[str, Any]) -> None:
+        with self.resources.engine.begin() as connection:
+            cursor_insert = insert(ingest_cursors).values(
+                source=POLYMARKET_CURSOR_SOURCE,
+                stream=TRADES_CURSOR_STREAM,
+                query_fingerprint=checkpoint["query_fingerprint"],
+                last_structural_sha256=None,
+                since_id=checkpoint["since_id"],
+                updated_at=_timestamp(checkpoint["updated_at"], "checkpoint.updated_at"),
+                last_successful_poll_at=_timestamp(
+                    checkpoint["last_successful_poll_at"],
+                    "checkpoint.last_successful_poll_at",
+                ),
+            )
+            connection.execute(
+                cursor_insert.on_conflict_do_update(
+                    index_elements=[
+                        ingest_cursors.c.source,
+                        ingest_cursors.c.stream,
+                    ],
+                    set_={
+                        "query_fingerprint": cursor_insert.excluded.query_fingerprint,
+                        "since_id": cursor_insert.excluded.since_id,
+                        "updated_at": cursor_insert.excluded.updated_at,
+                        "last_successful_poll_at": (
+                            cursor_insert.excluded.last_successful_poll_at
+                        ),
+                    },
+                    where=(
+                        cursor_insert.excluded.last_successful_poll_at
+                        >= ingest_cursors.c.last_successful_poll_at
+                    ),
+                )
+            )
+
+
+EVENT_STATE_COLUMNS = (
+    "slug",
+    "ticker",
+    "game_id",
+    "title",
+    "description",
+    "category",
+    "active",
+    "closed",
+    "start_at",
+    "end_at",
+    "tags",
+    "latest_raw_ingest_run_id",
+    "current_content_sha256",
+    "last_observed_at",
+)
+MARKET_RESOLUTION_STATE_COLUMNS = (
+    "event_id",
+    "condition_id",
+    "slug",
+    "question",
+    "group_item_title",
+    "group_item_threshold",
+    "sports_market_type",
+    "line",
+    "active",
+    "closed",
+    "accepting_orders",
+    "enable_order_book",
+    "outcome_prices",
+    "uma_resolution_status",
+    "winning_outcome_index",
+    "closed_time",
+    "resolution_observed_at",
+    "latest_raw_ingest_run_id",
+    "current_content_sha256",
+    "last_observed_at",
+)
+
+
+class ResolutionRepository:
+    """Persist final resolution state for markets absent from the open feed."""
+
+    def __init__(self, resources: DatabaseResources) -> None:
+        self.resources = resources
+
+    @classmethod
+    def from_environment(cls, src_dir: Path) -> ResolutionRepository:
+        return cls(create_database_resources(src_dir))
+
+    def close(self) -> None:
+        self.resources.close()
+
+    def load_checkpoint(self) -> dict[str, Any]:
+        with self.resources.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    ingest_cursors.select().where(
+                        ingest_cursors.c.source == POLYMARKET_CURSOR_SOURCE,
+                        ingest_cursors.c.stream == RESOLUTION_CURSOR_STREAM,
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return dict(row) if row else {}
+
+    def load_pending_event_ids(self, *, cutoff: datetime | None) -> list[str]:
+        """Events with markets whose UMA resolution has not been observed yet.
+
+        A market becomes pending once it is either observed closed or its event
+        disappears from the open discovery feed. Events missing for longer than
+        the cutoff are abandoned so provider deletions cannot grow the set
+        forever.
+        """
+        statement = (
+            select(polymarket_events.c.event_id)
+            .join(
+                polymarket_markets,
+                polymarket_markets.c.event_id == polymarket_events.c.event_id,
+            )
+            .where(
+                polymarket_markets.c.uma_resolution_status.is_distinct_from("resolved"),
+                or_(
+                    polymarket_markets.c.closed.is_(True),
+                    polymarket_events.c.missing_since.is_not(None),
+                ),
+            )
+            .distinct()
+            .order_by(polymarket_events.c.event_id)
+        )
+        if cutoff is not None:
+            statement = statement.where(
+                or_(
+                    polymarket_events.c.missing_since.is_(None),
+                    polymarket_events.c.missing_since > cutoff,
+                )
+            )
+        with self.resources.engine.connect() as connection:
+            rows = connection.execute(statement)
+            return [str(row.event_id) for row in rows]
+
+    def persist_records(self, envelope: dict[str, Any]) -> None:
+        ingest_run_id = envelope["ingest_run_id"]
+        with self.resources.engine.begin() as connection:
+            connection.execute(
+                insert(raw_ingest_objects)
+                .values(**raw_object_values(envelope))
+                .on_conflict_do_nothing(index_elements=[raw_ingest_objects.c.ingest_run_id])
+            )
+            for event in envelope["records"]:
+                values = event_values(event, ingest_run_id)
+                prior_hash = connection.scalar(
+                    select(polymarket_event_versions.c.content_sha256)
+                    .where(
+                        polymarket_event_versions.c.event_id == values["event_id"],
+                        polymarket_event_versions.c.observed_at
+                        < values["last_observed_at"],
+                    )
+                    .order_by(polymarket_event_versions.c.observed_at.desc())
+                    .limit(1)
+                )
+                event_insert = insert(polymarket_events).values(**values)
+                event_is_newer = (
+                    event_insert.excluded.last_observed_at
+                    >= polymarket_events.c.last_observed_at
+                )
+                connection.execute(
+                    event_insert.on_conflict_do_update(
+                        index_elements=[polymarket_events.c.event_id],
+                        set_={
+                            **{
+                                name: case(
+                                    (
+                                        event_is_newer,
+                                        getattr(event_insert.excluded, name),
+                                    ),
+                                    else_=getattr(polymarket_events.c, name),
+                                )
+                                for name in EVENT_STATE_COLUMNS
+                            },
+                            "first_observed_at": func.least(
+                                polymarket_events.c.first_observed_at,
+                                event_insert.excluded.first_observed_at,
+                            ),
+                        },
+                    )
+                )
+                if should_append_version(prior_hash, values["current_content_sha256"]):
+                    connection.execute(
+                        insert(polymarket_event_versions)
+                        .values(
+                            event_id=values["event_id"],
+                            observed_at=values["last_observed_at"],
+                            raw_ingest_run_id=ingest_run_id,
+                            content_sha256=values["current_content_sha256"],
+                        )
+                        .on_conflict_do_nothing(
+                            index_elements=[
+                                polymarket_event_versions.c.event_id,
+                                polymarket_event_versions.c.observed_at,
+                            ]
+                        )
+                    )
+
+                for market in event["markets"]:
+                    market_row = market_resolution_values(market, ingest_run_id)
+                    prior_market_hash = connection.scalar(
+                        select(polymarket_market_versions.c.content_sha256)
+                        .where(
+                            polymarket_market_versions.c.market_id
+                            == market_row["market_id"],
+                            polymarket_market_versions.c.observed_at
+                            < market_row["last_observed_at"],
+                        )
+                        .order_by(polymarket_market_versions.c.observed_at.desc())
+                        .limit(1)
+                    )
+                    market_insert = insert(polymarket_markets).values(**market_row)
+                    market_is_newer = (
+                        market_insert.excluded.last_observed_at
+                        >= polymarket_markets.c.last_observed_at
+                    )
+                    connection.execute(
+                        market_insert.on_conflict_do_update(
+                            index_elements=[polymarket_markets.c.market_id],
+                            set_={
+                                **{
+                                    name: case(
+                                        (
+                                            market_is_newer,
+                                            getattr(market_insert.excluded, name),
+                                        ),
+                                        else_=getattr(polymarket_markets.c, name),
+                                    )
+                                    for name in MARKET_RESOLUTION_STATE_COLUMNS
+                                },
+                                "first_observed_at": func.least(
+                                    polymarket_markets.c.first_observed_at,
+                                    market_insert.excluded.first_observed_at,
+                                ),
+                            },
+                        )
+                    )
+                    if should_append_version(
+                        prior_market_hash,
+                        market_row["current_content_sha256"],
+                    ):
+                        connection.execute(
+                            insert(polymarket_market_versions)
+                            .values(
+                                market_id=market_row["market_id"],
+                                observed_at=market_row["last_observed_at"],
+                                raw_ingest_run_id=ingest_run_id,
+                                content_sha256=market_row["current_content_sha256"],
+                            )
+                            .on_conflict_do_nothing(
+                                index_elements=[
+                                    polymarket_market_versions.c.market_id,
+                                    polymarket_market_versions.c.observed_at,
+                                ]
+                            )
+                        )
+
+    def finalize_cycle(self, checkpoint: dict[str, Any]) -> None:
+        with self.resources.engine.begin() as connection:
+            cursor_insert = insert(ingest_cursors).values(
+                source=POLYMARKET_CURSOR_SOURCE,
+                stream=RESOLUTION_CURSOR_STREAM,
+                query_fingerprint=checkpoint["query_fingerprint"],
+                last_structural_sha256=checkpoint["last_structural_sha256"],
+                since_id=None,
+                updated_at=_timestamp(checkpoint["updated_at"], "checkpoint.updated_at"),
+                last_successful_poll_at=_timestamp(
+                    checkpoint["last_successful_poll_at"],
+                    "checkpoint.last_successful_poll_at",
+                ),
+            )
+            connection.execute(
+                cursor_insert.on_conflict_do_update(
+                    index_elements=[
+                        ingest_cursors.c.source,
+                        ingest_cursors.c.stream,
+                    ],
+                    set_={
+                        "query_fingerprint": cursor_insert.excluded.query_fingerprint,
+                        "last_structural_sha256": (
+                            cursor_insert.excluded.last_structural_sha256
+                        ),
+                        "since_id": None,
                         "updated_at": cursor_insert.excluded.updated_at,
                         "last_successful_poll_at": (
                             cursor_insert.excluded.last_successful_poll_at

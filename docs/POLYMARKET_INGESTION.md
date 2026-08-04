@@ -23,6 +23,25 @@ high-frequency order books for every open token that accepts orders. These books
 contain the best bid, best ask, midpoint, spread, last-trade price when supplied,
 and executable depth.
 
+Because discovery filters on `closed=false`, a market that closes simply
+disappears from the open feed and its stored state would otherwise freeze with
+`closed=false` and no settlement outcome. The resolution collector closes that
+gap: it re-queries Gamma by event ID for every event that still has a market
+without an observed final UMA resolution and that is either observed closed or
+absent from the open feed. Each cycle archives the exact provider responses and
+persists `closed` flags, `outcomePrices`, UMA resolution status, the derived
+winning outcome index, and the provider close time. Events missing for longer
+than `resolution_max_event_age_days` are abandoned so provider deletions cannot
+grow the pending set forever.
+
+Order books capture standing offers, not transactions. The trades collector
+polls the public data API for executed trade prints across every order-book
+market still in the open feed, plus a one-day grace window after a market
+disappears so the final trades before close are retained. Each cycle re-scans a
+bounded overlap window behind its watermark; a deterministic trade identity
+hash makes overlap re-reads and envelope replays idempotent. Trades are
+append-only and are never updated.
+
 ## Running
 
 Apply migrations before starting the collector:
@@ -31,6 +50,8 @@ Apply migrations before starting the collector:
 alembic upgrade head
 python -m src.ingest_odds.polymarket_pull
 python -m src.ingest_odds.clob_order_book_pull
+python -m src.ingest_odds.gamma_resolution_pull
+python -m src.ingest_odds.trades_pull
 ```
 
 To inspect one real Gamma cycle locally without initializing GCS or PostgreSQL:
@@ -59,6 +80,26 @@ Standard output is canonical JSON, one exact proposed cloud envelope per depth.
 Comparison statistics, including retained level counts and compressed and
 uncompressed bytes, are written to standard error.
 
+A resolution dry run previews normalized settlement state for explicit event
+IDs, or for up to `--limit` pending events read from PostgreSQL, without any
+GCS, PostgreSQL, or checkpoint writes:
+
+```bash
+python -m src.ingest_odds.gamma_resolution_pull --dry-run --event-id 903193
+```
+
+Use `--once` on the live poller to run a single reconciliation cycle.
+
+A trades dry run fetches and prints normalized trade prints for explicit
+condition IDs, or for up to `--limit` open markets read from PostgreSQL,
+without any writes:
+
+```bash
+python -m src.ingest_odds.trades_pull --dry-run --condition-id 0x94d2...
+```
+
+Both new pollers also accept `--once` for a single live cycle.
+
 The public Gamma endpoint does not require an API key. The process reuses the
 same GCS and Cloud SQL credentials as X ingestion.
 
@@ -75,13 +116,28 @@ Configuration is in `src/config/polymarket_config.json`:
 - `clob_order_book_depth_usdc`: cumulative executable notional retained per side
 - `clob_order_book_batch_size`: token IDs per `/books` request, maximum 500
 - `clob_order_book_timeout_seconds` and `clob_order_book_max_attempts`: HTTP controls
+- `resolution_poll_interval_seconds`: sleep between resolution reconciliation
+  cycles, default 3600 seconds
+- `resolution_batch_size`: event IDs per Gamma request, default 20
+- `resolution_max_event_age_days`: pending events missing from the open feed for
+  longer than this are no longer re-queried, default 45
+- `trades_poll_interval_seconds`: sleep between trade-print cycles, default 60
+- `trades_market_batch_size`: condition IDs per data-API request, default 20
+- `trades_page_limit`: trades per page, default 500
+- `trades_max_pages_per_batch`: pagination safety limit per batch, default 10
+- `trades_overlap_seconds`: re-scanned window behind the watermark to absorb
+  late-indexed trades, default 120
+- `trades_initial_lookback_hours`: backfill window for a first run or changed
+  query fingerprint, default 24
 - `gcs_bucket`: raw archive bucket
 
 ## GCS layout
 
 ```text
 raw/provider=polymarket/source=gamma/object=events/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_events_<run_id>.json.gz
+raw/provider=polymarket/source=gamma/object=resolutions/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_resolutions_<run_id>.json.gz
 raw/provider=polymarket/source=clob/object=order-books/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_order_books_<run_id>.json.gz
+raw/provider=polymarket/source=data-api/object=trades/schema=v1/date=YYYY-MM-DD/hour=HH/polymarket_trades_<run_id>.json.gz
 ```
 
 `provider` identifies Polymarket, `source` identifies the Gamma API surface,
@@ -113,11 +169,19 @@ flags make the bounded payload auditable without archiving discarded levels.
 - `polymarket_events`: latest observed event state, including Gamma `game_id`
 - `polymarket_event_versions`: append-only changed event states
 - `polymarket_markets`: latest observed market state, including
-  `group_item_title` and `group_item_threshold` for entity extraction
+  `group_item_title` and `group_item_threshold` for entity extraction, plus
+  settlement columns written by the resolution collector: `outcome_prices`,
+  `uma_resolution_status`, `winning_outcome_index` (set only for an unambiguous
+  1/0 settlement; refunds and ties remain null), `closed_time`, and
+  `resolution_observed_at`
 - `polymarket_market_versions`: append-only changed market states
 - `polymarket_tokens`: market outcome to CLOB token mapping
 - `polymarket_current_order_books`: latest bounded bid/ask levels, one row per token
-- `ingest_cursors`: last fully successful Gamma and CLOB cycles
+- `polymarket_trades`: append-only executed trade prints keyed by a
+  deterministic identity hash; profile fields from the data API are kept only
+  in the raw envelope
+- `ingest_cursors`: last fully successful Gamma, CLOB, resolution, and trades
+  cycles; the trades cursor's `since_id` is the collection watermark timestamp
 
 Historical full books remain only in GCS. `raw_ingest_objects` is the compact
 PostgreSQL index from ingestion time to immutable GCS URI; training jobs query
@@ -159,7 +223,23 @@ Each successful CLOB cycle archives one immutable order-book envelope, replaces
 the current PostgreSQL book for every eligible token, and advances the stream
 checkpoint. A partial or malformed batch fails before upload or persistence.
 
-Run this collector as a separate `systemd` service from `x-ingestion.service`.
+A trades cycle with no new trades advances only the watermark, writing no GCS
+object and no rows. When trades exist, the envelope uploads before PostgreSQL
+persistence, and the `ON CONFLICT DO NOTHING` primary key makes replays and
+overlap re-reads idempotent. A failed upload writes nothing and leaves the
+watermark unchanged, so the next cycle re-scans the same window.
+
+A resolution cycle with no pending events performs no fetch and no writes. When
+the normalized resolution graph is unchanged from the previous cycle, the poller
+skips the GCS upload and state writes and only advances the successful-poll
+timestamp, mirroring Gamma discovery. Resolution updates never modify
+`missing_since`, because absence from the open discovery feed is tracked only by
+the discovery poller's complete keyset traversals. Stale replays are guarded by
+`last_observed_at` exactly like discovery writes, and changed states append
+`polymarket_event_versions` / `polymarket_market_versions` rows with raw-object
+lineage.
+
+Run these collectors as separate `systemd` services from `x-ingestion.service`.
 
 Example VM unit:
 
@@ -190,6 +270,20 @@ CLOB:
 ```ini
 Description=AI Sports Bettor Polymarket CLOB Order Book Ingestion
 ExecStart=/opt/ai-sports-bettor/.venv/bin/python -m src.ingest_odds.clob_order_book_pull
+```
+
+And a third for resolution reconciliation:
+
+```ini
+Description=AI Sports Bettor Polymarket Resolution Reconciliation
+ExecStart=/opt/ai-sports-bettor/.venv/bin/python -m src.ingest_odds.gamma_resolution_pull
+```
+
+And a fourth for trade prints:
+
+```ini
+Description=AI Sports Bettor Polymarket Trades Ingestion
+ExecStart=/opt/ai-sports-bettor/.venv/bin/python -m src.ingest_odds.trades_pull
 ```
 
 The environment file name can be shared because Gamma needs no secret of its
