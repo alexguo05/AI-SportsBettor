@@ -19,9 +19,9 @@ code. It contains production credentials.
 
 ## Current production snapshot
 
-Database-verified on August 4, 2026:
+Database-verified on August 5, 2026:
 
-- Alembic revision: `20260803_12`
+- Alembic revision: `20260805_17`
 - Entity-bank versions: 1
 - News enrichments:
   - 2,315 completed
@@ -54,9 +54,9 @@ was unavailable during the latest documentation update because the active
 gcloud identity lacked `compute.instances.get`. Confirm live service state from
 the VM before assuming every service is running.
 
-Last known deployed application commit during the initial rollout:
-`4bbf978`. Repository `main` later advanced to `079f7b0`. Use the commands below
-to confirm whether the VM has pulled the latest commit.
+Last known deployed application commit: `7fca71e` (August 5, Kalshi
+collectors). Use the commands below to confirm whether the VM has pulled the
+latest commit.
 
 ## Expected services
 
@@ -84,16 +84,16 @@ The complete production service set is:
     (result, settlement value, settlement timestamp) via a per-series settled
     sweep. See `docs/KALSHI_INGESTION.md`.
   - Normal cycle interval: 15 minutes.
-  - Built August 5; not yet deployed.
+  - Deployed August 5.
 - `kalshi-order-books.service`
   - Pulls Kalshi order books for active markets in batches of 100.
   - Normal cycle interval: 15 seconds.
-  - Built August 5; not yet deployed. Requires `kalshi-markets` to have run.
+  - Deployed August 5. Requires `kalshi-markets` to have run.
 - `kalshi-trades.service`
   - Pulls the exchange-wide Kalshi trade feed and keeps trades for tracked
     markets.
   - Normal cycle interval: 60 seconds.
-  - Built August 5; not yet deployed. Requires `kalshi-markets` to have run.
+  - Deployed August 5. Requires `kalshi-markets` to have run.
   - All three Kalshi services need `KALSHI_API_KEY_ID` and
     `KALSHI_PRIVATE_KEY_PATH` in the systemd environment file.
 - `news-market-linking.service` + `news-market-linking.timer`
@@ -121,6 +121,7 @@ Run on the VM:
 systemctl list-units --type=service --all --no-pager \
   'x-*' \
   'polymarket-*' \
+  'kalshi-*' \
   'job-worker*' \
   'entity-bank-*'
 ```
