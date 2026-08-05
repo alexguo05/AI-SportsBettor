@@ -248,7 +248,9 @@ def upgrade() -> None:
             sa.String(32),
             sa.ForeignKey(
                 "raw_ingest_objects.ingest_run_id",
-                name="fk_kalshi_current_order_books_raw_ingest_run_id_raw_ingest_objects",
+                # Shortened: the full ..._raw_ingest_objects form exceeds
+                # Postgres's 63-char identifier limit.
+                name="fk_kalshi_current_order_books_raw_ingest_run_id",
             ),
             nullable=False,
         ),
