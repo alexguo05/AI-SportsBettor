@@ -26,6 +26,7 @@ When directed to this file for modeling work:
 
 | Date | File | Question | Verdict |
 |------|------|----------|---------|
+| 2026-08-04 | [2026-08-04_gated-bucket-sweep.md](2026-08-04_gated-bucket-sweep.md) | What survives book-quality + volume gates? | Gates work: 17k rows on healthy books, ~10 real movers, zero-positive offseason regime confirmed |
 | 2026-08-04 | [2026-08-04_nfl-volume-audit.md](2026-08-04_nfl-volume-audit.md) | Do high-volume NFL markets move after tweets? | Big markets are the flattest (max 0.1c at 2h); all confirmed movers are sub-$50k niche markets |
 | 2026-08-04 | [2026-08-04_label-bucket-sweep.md](2026-08-04_label-bucket-sweep.md) | Class balance of UP/DOWN/FLAT buckets on week-1 data | Buckets work; ~99.9% flat, 25 trade-confirmed moves at +30m/2c — accumulate more trade-covered weeks before training |
 
@@ -94,3 +95,11 @@ Durable findings that future experiments should assume (append as learned):
   Require minimum notional (~$50-100) and/or >= 2 trades in the next label
   version. Only A.J. Brown-to-Patriots (Schefter thumb tweet, +10.8c held
   at 2h, $99 trade) looked genuinely tweet-caused.
+- Implemented as `midpoint_reaction_v2` + gated buckets (2026-08-04):
+  labels gate on baseline spread <= 5c and >= $100 depth per side, moves
+  need >= 2 trades and >= $50 notional, and a move must exceed half the
+  spread. On week-1 data this yields 17k labeled rows and ~10 movers.
+  A midpoint on a wide/empty book is not a price — untradeable moves
+  (e.g. A.J. Brown: 28.5c spread, $54 bid depth) are correctly excluded.
+- Fan-out attribution (every tweet in the window claims the same move) is
+  the largest remaining labeling artifact after v2.

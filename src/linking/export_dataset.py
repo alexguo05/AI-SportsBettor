@@ -28,6 +28,7 @@ from src.db.models import (
     polymarket_markets,
     polymarket_tokens,
 )
+from src.linking.reactions import LABEL_VERSION
 
 COMPLETED_STATUSES = ("completed", "completed_with_warnings")
 
@@ -64,6 +65,7 @@ class ExportRepository:
         *,
         since: datetime | None,
         until: datetime | None,
+        label_version: str = LABEL_VERSION,
     ) -> list[dict[str, Any]]:
         statement = (
             select(
@@ -107,6 +109,9 @@ class ExportRepository:
                 news_market_reactions.c.market_id,
                 news_market_reactions.c.token_id,
             )
+        )
+        statement = statement.where(
+            news_market_reactions.c.label_version == label_version
         )
         if since is not None:
             statement = statement.where(news_market_reactions.c.published_at >= since)
