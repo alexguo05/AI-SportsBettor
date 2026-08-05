@@ -8,7 +8,7 @@
   "polymarket_timeout_seconds": 30,
   "polymarket_max_attempts": 5,
   "clob_order_book_poll_interval_seconds": 10,
-  "clob_order_book_depth_usdc": 10000,
+  "clob_order_book_depth_usdc": 1000000000,
   "clob_order_book_batch_size": 500,
   "clob_order_book_timeout_seconds": 30,
   "clob_order_book_max_attempts": 5,

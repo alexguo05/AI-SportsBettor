@@ -79,6 +79,23 @@ The complete production service set is:
   - Pulls executed trade prints from the public data API.
   - Normal cycle interval: 60 seconds.
   - Deployed August 4.
+- `kalshi-markets.service`
+  - Pulls Kalshi series/event/market structure plus settlement results
+    (result, settlement value, settlement timestamp) via a per-series settled
+    sweep. See `docs/KALSHI_INGESTION.md`.
+  - Normal cycle interval: 15 minutes.
+  - Built August 5; not yet deployed.
+- `kalshi-order-books.service`
+  - Pulls Kalshi order books for active markets in batches of 100.
+  - Normal cycle interval: 15 seconds.
+  - Built August 5; not yet deployed. Requires `kalshi-markets` to have run.
+- `kalshi-trades.service`
+  - Pulls the exchange-wide Kalshi trade feed and keeps trades for tracked
+    markets.
+  - Normal cycle interval: 60 seconds.
+  - Built August 5; not yet deployed. Requires `kalshi-markets` to have run.
+  - All three Kalshi services need `KALSHI_API_KEY_ID` and
+    `KALSHI_PRIVATE_KEY_PATH` in the systemd environment file.
 - `news-market-linking.service` + `news-market-linking.timer`
   - Oneshot batch triggered hourly by the timer (not a long-running poller).
   - Rebuilds tweet-market links, then labels links whose two-hour reaction

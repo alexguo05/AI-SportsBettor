@@ -27,7 +27,8 @@ SCHEMA_VERSION = 1
 STORAGE_PROVIDER = "polymarket"
 STORAGE_SOURCE = "clob"
 STORAGE_OBJECT = "order-books"
-DEFAULT_DEPTH_USDC = Decimal("10000")
+# Effectively unbounded: retain the full ladder, matching production.
+DEFAULT_DEPTH_USDC = Decimal("1000000000")
 MAX_BATCH_SIZE = 500
 
 
@@ -85,7 +86,9 @@ def load_config(path: Path) -> ClobOrderBookConfig:
     return ClobOrderBookConfig(
         bucket_name=str(payload.get("gcs_bucket", "ai-sports-bettor")),
         poll_interval_seconds=int(payload.get("clob_order_book_poll_interval_seconds", 10)),
-        depth_usdc=Decimal(str(payload.get("clob_order_book_depth_usdc", "10000"))),
+        depth_usdc=Decimal(
+            str(payload.get("clob_order_book_depth_usdc", str(DEFAULT_DEPTH_USDC)))
+        ),
         batch_size=int(payload.get("clob_order_book_batch_size", MAX_BATCH_SIZE)),
         timeout_seconds=float(payload.get("clob_order_book_timeout_seconds", 30)),
         max_attempts=int(payload.get("clob_order_book_max_attempts", 5)),

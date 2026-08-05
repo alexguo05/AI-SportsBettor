@@ -42,3 +42,5 @@ dist/
 commands_test.txt
 ai-sports-bettor-559e8837739f.json
 ai-sports-bettor-ca23c8a9d150.json
+kalshi-key.txt
+*.key

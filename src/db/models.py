@@ -328,6 +328,229 @@ Index(
     polymarket_current_order_books.c.observed_at,
 )
 
+kalshi_series = Table(
+    "kalshi_series",
+    metadata,
+    Column("series_ticker", String(64), primary_key=True),
+    Column("title", Text),
+    Column("category", String(64)),
+    Column("frequency", String(64)),
+    Column("tags", JSONB, nullable=False),
+    Column("fee_type", String(64)),
+    Column("fee_multiplier", Numeric),
+    Column("settlement_sources", JSONB, nullable=False),
+    Column("contract_url", Text),
+    Column(
+        "latest_raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("first_observed_at", DateTime(timezone=True), nullable=False),
+    Column("last_observed_at", DateTime(timezone=True), nullable=False),
+)
+
+kalshi_events = Table(
+    "kalshi_events",
+    metadata,
+    Column("event_ticker", String(96), primary_key=True),
+    Column("series_ticker", String(64), nullable=False),
+    Column("title", Text, nullable=False),
+    Column("sub_title", Text),
+    Column("category", String(64)),
+    Column("mutually_exclusive", Boolean),
+    Column("collateral_return_type", String(32)),
+    Column("strike_date", DateTime(timezone=True)),
+    Column("strike_period", String(64)),
+    Column("settlement_sources", JSONB, nullable=False),
+    Column("product_metadata", JSONB),
+    Column("available_on_brokers", Boolean),
+    Column(
+        "latest_raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("current_content_sha256", String(64), nullable=False),
+    Column("first_observed_at", DateTime(timezone=True), nullable=False),
+    Column("last_observed_at", DateTime(timezone=True), nullable=False),
+    Column("missing_since", DateTime(timezone=True)),
+)
+Index("ix_kalshi_events_series_ticker", kalshi_events.c.series_ticker)
+Index("ix_kalshi_events_last_observed_at", kalshi_events.c.last_observed_at)
+
+kalshi_event_versions = Table(
+    "kalshi_event_versions",
+    metadata,
+    Column(
+        "event_ticker",
+        String(96),
+        ForeignKey("kalshi_events.event_ticker", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("observed_at", DateTime(timezone=True), primary_key=True),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("content_sha256", String(64), nullable=False),
+)
+
+# No foreign key to kalshi_events: the settled-market sweep can capture a
+# market whose parent event never appeared in the open feed, and that must not
+# reject an archived batch.
+kalshi_markets = Table(
+    "kalshi_markets",
+    metadata,
+    Column("ticker", String(128), primary_key=True),
+    Column("event_ticker", String(96), nullable=False),
+    Column("series_ticker", String(64)),
+    Column("market_type", String(16), nullable=False),
+    Column("title", Text),
+    Column("yes_sub_title", Text),
+    Column("no_sub_title", Text),
+    Column("rules_primary", Text),
+    Column("rules_secondary", Text),
+    Column("status", String(32), nullable=False),
+    Column("result", String(16)),
+    Column("settlement_value", Numeric),
+    Column("settlement_ts", DateTime(timezone=True)),
+    Column("expiration_value", Text),
+    Column("can_close_early", Boolean),
+    Column("early_close_condition", Text),
+    Column("open_time", DateTime(timezone=True)),
+    Column("close_time", DateTime(timezone=True)),
+    Column("expected_expiration_time", DateTime(timezone=True)),
+    Column("latest_expiration_time", DateTime(timezone=True)),
+    Column("occurrence_datetime", DateTime(timezone=True)),
+    Column("created_time", DateTime(timezone=True)),
+    Column("updated_time", DateTime(timezone=True)),
+    Column("settlement_timer_seconds", Integer),
+    Column("strike_type", String(32)),
+    Column("floor_strike", Numeric),
+    Column("cap_strike", Numeric),
+    Column("functional_strike", Text),
+    Column("custom_strike", JSONB),
+    Column("price_level_structure", Text),
+    Column("price_ranges", JSONB),
+    Column("notional_value", Numeric),
+    Column("is_provisional", Boolean),
+    Column("primary_participant_key", Text),
+    Column("mve_collection_ticker", Text),
+    Column("yes_bid", Numeric),
+    Column("yes_ask", Numeric),
+    Column("no_bid", Numeric),
+    Column("no_ask", Numeric),
+    Column("last_price", Numeric),
+    Column("previous_price", Numeric),
+    Column("yes_bid_size", Numeric),
+    Column("yes_ask_size", Numeric),
+    Column("volume", Numeric),
+    Column("volume_24h", Numeric),
+    Column("open_interest", Numeric),
+    Column(
+        "latest_raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("current_content_sha256", String(64), nullable=False),
+    Column("first_observed_at", DateTime(timezone=True), nullable=False),
+    Column("last_observed_at", DateTime(timezone=True), nullable=False),
+    Column("missing_since", DateTime(timezone=True)),
+)
+Index("ix_kalshi_markets_event_ticker", kalshi_markets.c.event_ticker)
+Index("ix_kalshi_markets_series_ticker", kalshi_markets.c.series_ticker)
+Index("ix_kalshi_markets_status", kalshi_markets.c.status)
+Index("ix_kalshi_markets_settlement_ts", kalshi_markets.c.settlement_ts)
+
+kalshi_market_versions = Table(
+    "kalshi_market_versions",
+    metadata,
+    Column(
+        "ticker",
+        String(128),
+        ForeignKey("kalshi_markets.ticker", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("observed_at", DateTime(timezone=True), primary_key=True),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("content_sha256", String(64), nullable=False),
+)
+
+# Trades reference markets the collector already knows, but no foreign key is
+# enforced: a provider-side ticker mismatch must not reject an archived batch.
+kalshi_trades = Table(
+    "kalshi_trades",
+    metadata,
+    Column("trade_id", String(64), primary_key=True),
+    Column("ticker", String(128), nullable=False),
+    Column("count", Numeric, nullable=False),
+    Column("yes_price", Numeric, nullable=False),
+    Column("no_price", Numeric, nullable=False),
+    Column("taker_outcome_side", String(8)),
+    Column("taker_book_side", String(8)),
+    Column("is_block_trade", Boolean, nullable=False),
+    Column("traded_at", DateTime(timezone=True), nullable=False),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+)
+Index(
+    "ix_kalshi_trades_ticker_traded_at",
+    kalshi_trades.c.ticker,
+    kalshi_trades.c.traded_at,
+)
+Index("ix_kalshi_trades_traded_at", kalshi_trades.c.traded_at)
+
+kalshi_current_order_books = Table(
+    "kalshi_current_order_books",
+    metadata,
+    Column(
+        "ticker",
+        String(128),
+        ForeignKey("kalshi_markets.ticker", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("depth_usdc", Numeric, nullable=False),
+    Column("bids", JSONB, nullable=False),
+    Column("asks", JSONB, nullable=False),
+    Column("best_bid", Numeric),
+    Column("best_ask", Numeric),
+    Column("midpoint", Numeric),
+    Column("spread", Numeric),
+    Column("bid_captured_notional", Numeric, nullable=False),
+    Column("bid_captured_shares", Numeric, nullable=False),
+    Column("bid_total_notional", Numeric, nullable=False),
+    Column("bid_truncated", Boolean, nullable=False),
+    Column("ask_captured_notional", Numeric, nullable=False),
+    Column("ask_captured_shares", Numeric, nullable=False),
+    Column("ask_total_notional", Numeric, nullable=False),
+    Column("ask_truncated", Boolean, nullable=False),
+    Column(
+        "raw_ingest_run_id",
+        String(32),
+        ForeignKey("raw_ingest_objects.ingest_run_id"),
+        nullable=False,
+    ),
+)
+Index(
+    "ix_kalshi_current_order_books_observed_at",
+    kalshi_current_order_books.c.observed_at,
+)
+
 entity_bank_versions = Table(
     "entity_bank_versions",
     metadata,

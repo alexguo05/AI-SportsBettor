@@ -19,7 +19,10 @@ When directed to this file for modeling work:
    it contains settled findings; do not re-litigate them.
 2. After running an experiment, add its file here, update the index table,
    and append any durable finding to "Standing knowledge".
-3. Pipeline context lives in `docs/LINKING.md` (links, reaction labels,
+3. When you run a data analysis at the user's request, append a terse
+   entry (date, question, measured result with key numbers) to `QA.md`
+   in this directory. Only analysis results — not strategy discussion.
+4. Pipeline context lives in `docs/LINKING.md` (links, reaction labels,
    dataset export) and `docs/VM_OPERATIONS.md` (what runs where).
 
 ## Index
