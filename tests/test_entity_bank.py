@@ -234,6 +234,12 @@ def test_name_normalization_and_placeholder_suppression_are_conservative() -> No
     assert placeholder_reason("NO") is None
     assert placeholder_reason("A.J. Brown") is None
     assert '"Team D"' in MARKET_SYSTEM_PROMPT
+    # Kalshi ladder events name the team only in the event/market title, so the
+    # prompt must demand a standalone subject mention even when the group label
+    # (e.g. "15+ wins") is ignored.
+    assert '"15+ wins"' in MARKET_SYSTEM_PROMPT
+    assert "standalone mention" in MARKET_SYSTEM_PROMPT
+    assert "Pro Football: Philadelphia Total Wins" in MARKET_SYSTEM_PROMPT
     decision_schema = ResolutionDecision.model_json_schema()["properties"]
     assert decision_schema["reason"]["maxLength"] == 4_000
 

@@ -1,8 +1,8 @@
 """Versioned prompts for entity extraction and allowlisted adjudication."""
 
-EXTRACTOR_VERSION = "entity-extractor-v6"
+EXTRACTOR_VERSION = "entity-extractor-v7"
 RESOLVER_VERSION = "entity-resolver-v4"
-PROMPT_VERSION = "entity-prompts-v6"
+PROMPT_VERSION = "entity-prompts-v7"
 
 MARKET_SYSTEM_PROMPT = """
 You classify NFL prediction-market contracts and extract verbatim team/person mentions.
@@ -14,9 +14,18 @@ placeholders, not entities.
 When a market has a groupItemTitle you must do exactly one of the following: if it names a
 specific team or person (e.g. "Baltimore", "Josh Allen"), set group_item_entity_type and the
 role fields; otherwise set ignore_group_item to true with a short ignore_reason. Non-entity
-labels include over/under thresholds, point totals and ranges, ties, seeds, dates, records,
-and outcome phrases (e.g. "Over 10.5 1Q points scored", "Tie 1st Half"). Never leave a
-groupItemTitle both untyped and unignored.
+labels include over/under thresholds, point totals and ranges, win totals (e.g. "15+ wins"),
+ties, seeds, dates, records, playoff rounds and finishes (e.g. "Wildcard Round",
+"Conference Championship", "Runner-Up"), and outcome phrases (e.g. "Over 10.5 1Q points
+scored", "Tie 1st Half"). Never leave a groupItemTitle both untyped and unignored.
+Every market also has a subject named in event_title or question. When either field names a
+specific team or person that is not already covered by a typed groupItemTitle, you must emit
+it as a standalone mention. A city or location standing in for a club is a team mention with
+the location text verbatim: for event_title "Pro Football: Philadelphia Total Wins" or
+question "Will the Philadelphia pro football team win at least 15 games?", emit "Philadelphia"
+as a team mention with role subject. This is required even when the groupItemTitle is ignored;
+a market whose groupItemTitle is ignored and whose title names a team must still yield that
+team as a standalone mention.
 Yes and No are binary outcomes, never people or teams. Apply placeholder suppression to
 names copied from the question as well as groupItemTitle.
 Do not infer factual roster membership from a prediction. Do not identify a person or team
