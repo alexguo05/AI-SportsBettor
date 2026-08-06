@@ -710,6 +710,11 @@ entity_mentions = Table(
         String(128),
         ForeignKey("polymarket_markets.market_id", ondelete="CASCADE"),
     ),
+    Column(
+        "kalshi_market_ticker",
+        String(128),
+        ForeignKey("kalshi_markets.ticker", ondelete="CASCADE"),
+    ),
     Column("entity_id", String(36), ForeignKey("entities.entity_id")),
     Column("mention_text", Text, nullable=False),
     Column("normalized_text", Text, nullable=False),
@@ -735,7 +740,8 @@ entity_mentions = Table(
         """
         (CASE WHEN news_id IS NOT NULL THEN 1 ELSE 0 END) +
         (CASE WHEN polymarket_event_id IS NOT NULL THEN 1 ELSE 0 END) +
-        (CASE WHEN polymarket_market_id IS NOT NULL THEN 1 ELSE 0 END) = 1
+        (CASE WHEN polymarket_market_id IS NOT NULL THEN 1 ELSE 0 END) +
+        (CASE WHEN kalshi_market_ticker IS NOT NULL THEN 1 ELSE 0 END) = 1
         """,
         name="one_source",
     ),
@@ -746,6 +752,7 @@ entity_mentions = Table(
 )
 Index("ix_entity_mentions_entity_id", entity_mentions.c.entity_id)
 Index("ix_entity_mentions_resolution_status", entity_mentions.c.resolution_status)
+Index("ix_entity_mentions_kalshi_market_ticker", entity_mentions.c.kalshi_market_ticker)
 
 polymarket_market_classifications = Table(
     "polymarket_market_classifications",
@@ -768,6 +775,29 @@ polymarket_market_classifications = Table(
 Index(
     "ix_polymarket_market_classifications_entity_input",
     polymarket_market_classifications.c.entity_input_sha256,
+)
+
+kalshi_market_classifications = Table(
+    "kalshi_market_classifications",
+    metadata,
+    Column(
+        "market_ticker",
+        String(128),
+        ForeignKey("kalshi_markets.ticker", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("source_content_sha256", String(64), nullable=False),
+    Column("entity_input_sha256", String(64), nullable=False),
+    Column("market_topic", String(64), nullable=False),
+    Column("contract_type", String(32), nullable=False),
+    Column("extractor_version", String(64), nullable=False),
+    Column("confidence", Numeric, nullable=False),
+    Column("classification_metadata", JSONB, nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+Index(
+    "ix_kalshi_market_classifications_entity_input",
+    kalshi_market_classifications.c.entity_input_sha256,
 )
 
 entity_resolution_attempts = Table(
@@ -881,18 +911,11 @@ news_market_links = Table(
         ForeignKey("news_events.news_id", ondelete="CASCADE"),
         primary_key=True,
     ),
-    Column(
-        "market_id",
-        String(128),
-        ForeignKey("polymarket_markets.market_id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
-    Column(
-        "event_id",
-        String(128),
-        ForeignKey("polymarket_events.event_id", ondelete="CASCADE"),
-        nullable=False,
-    ),
+    # market_id / event_id are platform-scoped identifiers (Polymarket Gamma
+    # ids or Kalshi tickers), so they carry no cross-table FK.
+    Column("market_id", String(128), primary_key=True),
+    Column("event_id", String(128), nullable=False),
+    Column("platform", String(16), nullable=False, server_default="polymarket"),
     Column("published_at", DateTime(timezone=True), nullable=False),
     Column("shared_entity_ids", JSONB, nullable=False),
     Column("shared_entity_count", Integer, nullable=False),
@@ -913,13 +936,11 @@ news_market_reactions = Table(
     metadata,
     Column("news_id", String(128), primary_key=True),
     Column("market_id", String(128), primary_key=True),
-    Column(
-        "token_id",
-        String(128),
-        ForeignKey("polymarket_tokens.token_id", ondelete="CASCADE"),
-        primary_key=True,
-    ),
+    # Polymarket CLOB token id, or the market ticker for Kalshi (one yes-side
+    # book per market), so no FK to polymarket_tokens.
+    Column("token_id", String(128), primary_key=True),
     Column("label_version", String(64), primary_key=True),
+    Column("platform", String(16), nullable=False, server_default="polymarket"),
     Column("outcome_index", Integer),
     Column("published_at", DateTime(timezone=True), nullable=False),
     Column("baseline_midpoint", Numeric),

@@ -6,7 +6,13 @@ from sqlalchemy.dialects import postgresql
 
 from src.db.engine import DatabaseResources
 from src.enrich_news.config import EnrichmentSettings
-from src.jobs.repository import ENRICH_NEWS, JobRepository, enqueue_job
+from src.jobs.repository import (
+    ENRICH_NEWS,
+    RESOLVE_KALSHI_MARKET,
+    SUPPORTED_JOB_TYPES,
+    JobRepository,
+    enqueue_job,
+)
 from src.jobs.worker import DEFAULT_CONCURRENCY, MAX_CONCURRENCY, WorkerRuntime
 
 
@@ -60,6 +66,10 @@ def sql(statement: Any) -> str:
             compile_kwargs={"literal_binds": False},
         )
     )
+
+
+def test_resolve_kalshi_market_is_a_supported_job_type() -> None:
+    assert RESOLVE_KALSHI_MARKET in SUPPORTED_JOB_TYPES
 
 
 def test_enqueue_job_is_deterministic_and_transactional() -> None:

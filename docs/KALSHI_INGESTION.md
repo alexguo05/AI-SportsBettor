@@ -86,6 +86,22 @@ settlement/closing data: `result`, `settlement_value`, `settlement_ts`,
 structure). The raw event/market JSON is archived verbatim in the GCS
 envelope (`raw_api_responses`).
 
+### Entity extraction hookup
+
+When an event's structural hash (or any of its markets') changes, the
+repository enqueues a `resolve_kalshi_market` job in the same transaction,
+mirroring Polymarket's `resolve_market`. The `job-worker.service` loads the
+event with its nested markets, shapes them into the shared classifier
+input (market `title` → question, `yes_sub_title` → group-item label,
+tickers → slugs, strikes → threshold), and runs the same LLM
+classification + entity resolution. Mentions land in `entity_mentions`
+with `kalshi_market_ticker` set; classifications land in
+`kalshi_market_classifications`. From there the linker and reaction
+builder pick Kalshi markets up like any other (see `docs/LINKING.md`).
+Existing events that predate this hookup are backfilled once with the seed
+command (`python -m src.jobs.seed --apply ...`), which enqueues every
+non-missing Kalshi event.
+
 ## Order-book collector (`kalshi-order-books`)
 
 Snapshots every market in `kalshi_markets` with `status = 'active'` and

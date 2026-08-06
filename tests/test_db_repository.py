@@ -36,6 +36,7 @@ def test_ingestion_schema_contains_expected_tables() -> None:
         "kalshi_market_versions",
         "kalshi_trades",
         "kalshi_current_order_books",
+        "kalshi_market_classifications",
         "entity_bank_versions",
         "entities",
         "entity_aliases",
@@ -68,6 +69,12 @@ def test_ingestion_schema_contains_expected_tables() -> None:
     assert "confidence" not in enrichment_columns
     assert "entity_extractor_version" in enrichment_columns
     assert "source_refs" in metadata.tables["entity_mentions"].columns
+    assert "kalshi_market_ticker" in metadata.tables["entity_mentions"].columns
+    assert "platform" in metadata.tables["news_market_links"].columns
+    assert "platform" in metadata.tables["news_market_reactions"].columns
+    assert metadata.tables[
+        "kalshi_market_classifications"
+    ].primary_key.columns.keys() == ["market_ticker"]
     assert metadata.tables[
         "news_entity_resolution_runs"
     ].primary_key.columns.keys() == [

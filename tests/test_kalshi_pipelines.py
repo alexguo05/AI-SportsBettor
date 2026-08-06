@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
+from src.db.kalshi_repository import KalshiStructureRepository
 from src.ingest_odds.kalshi_markets_pipeline import (
     KalshiMarketsConfig,
     fetch_structure,
@@ -468,3 +471,81 @@ def test_trades_config_validation() -> None:
         KalshiTradesConfig(overlap_seconds=-1)
     with pytest.raises(ValueError):
         KalshiMarketsConfig(series_patterns=())
+
+
+class FakeSqlConnection:
+    def __init__(self) -> None:
+        self.statements: list[Any] = []
+
+    def execute(self, statement: Any, *_args: Any) -> Any:
+        self.statements.append(statement)
+        return SimpleNamespace(rowcount=0)
+
+    def scalar(self, statement: Any) -> None:
+        self.statements.append(statement)
+        return None
+
+
+class FakeSqlBegin:
+    def __init__(self, connection: FakeSqlConnection) -> None:
+        self.connection = connection
+
+    def __enter__(self) -> FakeSqlConnection:
+        return self.connection
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+
+class FakeSqlEngine:
+    def __init__(self, connection: FakeSqlConnection) -> None:
+        self.connection = connection
+
+    def begin(self) -> FakeSqlBegin:
+        return FakeSqlBegin(self.connection)
+
+
+def test_structure_repository_enqueues_resolution_on_structural_change() -> None:
+    event = {
+        "event_ticker": "KXNFLGAME-26AUG15DALSEA",
+        "series_ticker": "KXNFLGAME",
+        "title": "Seattle at Dallas",
+        "sub_title": "Preseason Week 1",
+        "mutually_exclusive": True,
+        "collateral_return_type": "binary",
+        "settlement_sources": [{"name": "NFL", "url": "https://nfl.com"}],
+        "markets": [market_payload()],
+    }
+    record = normalize_kalshi_event(event, NOW, {"KXNFLGAME"})
+    assert record is not None
+    envelope = {
+        "ingest_run_id": "a" * 32,
+        "provider": "kalshi",
+        "source": "trade-api",
+        "object_type": "structure",
+        "schema_name": "kalshi_structure",
+        "schema_version": 1,
+        "storage_uri": "gs://bucket/object.json.gz",
+        "content_sha256": "b" * 64,
+        "record_count": 1,
+        "ingested_at": NOW.isoformat(),
+        "request": {},
+        "records": {"series": [], "events": [record], "settled_markets": []},
+    }
+    connection = FakeSqlConnection()
+    resources = SimpleNamespace(engine=FakeSqlEngine(connection), close=lambda: None)
+    repository = KalshiStructureRepository(resources)  # type: ignore[arg-type]
+
+    repository.persist_records(envelope)
+
+    sql = "\n".join(
+        str(statement.compile(dialect=postgresql.dialect()))
+        for statement in connection.statements
+    )
+    # A new event (prior hash None) enqueues one resolve_kalshi_market job
+    # in the same transaction and notifies listeners.
+    assert "INSERT INTO job_outbox" in sql
+    assert "ON CONFLICT (job_type, idempotency_key) DO NOTHING" in sql
+    assert "pg_notify" in sql
+    assert "INSERT INTO kalshi_events" in sql
+    assert "INSERT INTO kalshi_markets" in sql

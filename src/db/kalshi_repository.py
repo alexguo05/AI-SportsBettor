@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +24,8 @@ from src.db.models import (
     raw_ingest_objects,
 )
 from src.db.repository import raw_object_values
+from src.entity_bank.prompt import EXTRACTOR_VERSION
+from src.jobs.repository import RESOLVE_KALSHI_MARKET, enqueue_job
 
 KALSHI_CURSOR_SOURCE = "kalshi"
 STRUCTURE_CURSOR_STREAM = "structure"
@@ -256,7 +259,8 @@ class KalshiStructureRepository:
         connection: Any,
         market_row: dict[str, Any],
         ingest_run_id: str,
-    ) -> None:
+    ) -> bool:
+        """Upsert one market; returns True when its structural hash changed."""
         prior_hash = connection.scalar(
             select(kalshi_market_versions.c.content_sha256)
             .where(
@@ -288,7 +292,10 @@ class KalshiStructureRepository:
                 },
             )
         )
-        if should_append_version(prior_hash, market_row["current_content_sha256"]):
+        market_changed = should_append_version(
+            prior_hash, market_row["current_content_sha256"]
+        )
+        if market_changed:
             connection.execute(
                 insert(kalshi_market_versions)
                 .values(
@@ -304,6 +311,7 @@ class KalshiStructureRepository:
                     ]
                 )
             )
+        return market_changed
 
     def persist_records(self, envelope: dict[str, Any]) -> None:
         ingest_run_id = envelope["ingest_run_id"]
@@ -351,6 +359,7 @@ class KalshiStructureRepository:
             for event in records.get("events", []):
                 values = event_values(event, ingest_run_id)
                 seen_event_tickers.add(values["event_ticker"])
+                event_market_hashes: list[str] = []
                 prior_hash = connection.scalar(
                     select(kalshi_event_versions.c.content_sha256)
                     .where(
@@ -383,7 +392,10 @@ class KalshiStructureRepository:
                         },
                     )
                 )
-                if should_append_version(prior_hash, values["current_content_sha256"]):
+                event_needs_resolution = should_append_version(
+                    prior_hash, values["current_content_sha256"]
+                )
+                if event_needs_resolution:
                     connection.execute(
                         insert(kalshi_event_versions)
                         .values(
@@ -403,7 +415,34 @@ class KalshiStructureRepository:
                 for market in event["markets"]:
                     market_row = market_values(market, ingest_run_id)
                     seen_market_tickers.add(market_row["ticker"])
-                    self._upsert_market(connection, market_row, ingest_run_id)
+                    event_market_hashes.append(market_row["current_content_sha256"])
+                    market_changed = self._upsert_market(
+                        connection, market_row, ingest_run_id
+                    )
+                    event_needs_resolution = event_needs_resolution or market_changed
+
+                if event_needs_resolution:
+                    resolution_digest = hashlib.sha256(
+                        "|".join(
+                            [
+                                values["current_content_sha256"],
+                                *sorted(event_market_hashes),
+                                EXTRACTOR_VERSION,
+                            ]
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    enqueue_job(
+                        connection,
+                        job_type=RESOLVE_KALSHI_MARKET,
+                        idempotency_key=(
+                            f"{values['event_ticker']}:{resolution_digest}"
+                        ),
+                        payload={
+                            "event_ticker": values["event_ticker"],
+                            "extractor_version": EXTRACTOR_VERSION,
+                        },
+                        priority=5,
+                    )
 
             for market in records.get("settled_markets", []):
                 market_row = market_values(market, ingest_run_id)

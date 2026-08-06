@@ -28,6 +28,7 @@ from sqlalchemy.dialects.postgresql import insert
 from src.common.gcs import create_gcs_client
 from src.db.engine import DatabaseResources, create_database_resources
 from src.db.models import (
+    kalshi_trades,
     news_market_links,
     news_market_reactions,
     polymarket_tokens,
@@ -46,9 +47,12 @@ POST_WINDOW_SECONDS = 7200
 BASELINE_LOOKBACK_SECONDS = 600
 HORIZON_TOLERANCE_SECONDS = 120
 ENVELOPE_CACHE_SIZE = 64
-ORDER_BOOK_PROVIDER = "polymarket"
-ORDER_BOOK_SOURCE = "clob"
-ORDER_BOOK_OBJECT = "order-books"
+# raw_ingest_objects coordinates of the order-book envelope stream per
+# platform: (provider, source, object_type).
+ORDER_BOOK_STREAMS: dict[str, tuple[str, str, str]] = {
+    "polymarket": ("polymarket", "clob", "order-books"),
+    "kalshi": ("kalshi", "trade-api", "order-books"),
+}
 
 
 def utc_now() -> datetime:
@@ -83,8 +87,10 @@ class GcsEnvelopeReader:
         if raw[:2] == b"\x1f\x8b":
             raw = gzip.decompress(raw)
         envelope = json.loads(raw)
+        # Polymarket books are keyed by CLOB token_id; Kalshi books carry the
+        # market ticker (one yes-side book per market). Field names match.
         books = {
-            record["token_id"]: {
+            (record.get("token_id") or record["ticker"]): {
                 "midpoint": record.get("midpoint"),
                 "spread": record.get("spread"),
                 "bid_depth": record.get("bid_captured_notional"),
@@ -194,6 +200,7 @@ def build_reaction_rows(
             "market_id": link["market_id"],
             "token_id": token_id,
             "label_version": LABEL_VERSION,
+            "platform": link.get("platform", "polymarket"),
             "outcome_index": token["outcome_index"],
             "published_at": published_at,
             "baseline_midpoint": baseline_midpoint,
@@ -258,6 +265,7 @@ class ReactionsRepository:
             select(
                 news_market_links.c.news_id,
                 news_market_links.c.market_id,
+                news_market_links.c.platform,
                 news_market_links.c.published_at,
             )
             .where(
@@ -296,7 +304,9 @@ class ReactionsRepository:
         *,
         window_start: datetime,
         window_end: datetime,
+        platform: str = "polymarket",
     ) -> list[dict[str, Any]]:
+        provider, source, object_type = ORDER_BOOK_STREAMS[platform]
         statement = (
             select(
                 raw_ingest_objects.c.ingest_run_id,
@@ -304,9 +314,9 @@ class ReactionsRepository:
                 raw_ingest_objects.c.ingested_at,
             )
             .where(
-                raw_ingest_objects.c.provider == ORDER_BOOK_PROVIDER,
-                raw_ingest_objects.c.source == ORDER_BOOK_SOURCE,
-                raw_ingest_objects.c.object_type == ORDER_BOOK_OBJECT,
+                raw_ingest_objects.c.provider == provider,
+                raw_ingest_objects.c.source == source,
+                raw_ingest_objects.c.object_type == object_type,
                 raw_ingest_objects.c.ingested_at >= window_start,
                 raw_ingest_objects.c.ingested_at <= window_end,
             )
@@ -315,9 +325,10 @@ class ReactionsRepository:
         with self.resources.engine.connect() as connection:
             return [dict(row) for row in connection.execute(statement).mappings()]
 
-    def trades_floor(self) -> datetime | None:
+    def trades_floor(self, *, platform: str = "polymarket") -> datetime | None:
+        table = kalshi_trades if platform == "kalshi" else polymarket_trades
         with self.resources.engine.connect() as connection:
-            return connection.scalar(select(func.min(polymarket_trades.c.traded_at)))
+            return connection.scalar(select(func.min(table.c.traded_at)))
 
     def load_trade_stats(
         self,
@@ -346,6 +357,37 @@ class ReactionsRepository:
         with self.resources.engine.connect() as connection:
             return {
                 row.token_id: (int(row.trade_count), Decimal(row.trade_notional))
+                for row in connection.execute(statement)
+            }
+
+    def load_kalshi_trade_stats(
+        self,
+        *,
+        tickers: list[str],
+        window_start: datetime,
+        window_end: datetime,
+    ) -> dict[str, tuple[int, Decimal]]:
+        """Yes-side trade stats keyed by ticker: notional = yes_price * count."""
+        if not tickers:
+            return {}
+        statement = (
+            select(
+                kalshi_trades.c.ticker,
+                func.count().label("trade_count"),
+                func.sum(kalshi_trades.c.yes_price * kalshi_trades.c.count).label(
+                    "trade_notional"
+                ),
+            )
+            .where(
+                kalshi_trades.c.ticker.in_(sorted(set(tickers))),
+                kalshi_trades.c.traded_at >= window_start,
+                kalshi_trades.c.traded_at <= window_end,
+            )
+            .group_by(kalshi_trades.c.ticker)
+        )
+        with self.resources.engine.connect() as connection:
+            return {
+                row.ticker: (int(row.trade_count), Decimal(row.trade_notional))
                 for row in connection.execute(statement)
             }
 
@@ -390,9 +432,22 @@ def run_builder(
         return 0
     print(f"Building reaction labels for {len(links)} links at {LABEL_VERSION}")
     tokens_by_market = repository.load_market_tokens(
-        [link["market_id"] for link in links]
+        [
+            link["market_id"]
+            for link in links
+            if link.get("platform", "polymarket") == "polymarket"
+        ]
     )
-    trades_floor = repository.trades_floor()
+    trades_floors = {
+        platform: repository.trades_floor(platform=platform)
+        for platform in ORDER_BOOK_STREAMS
+    }
+
+    def link_tokens(link: dict[str, Any]) -> list[dict[str, Any]]:
+        if link.get("platform", "polymarket") == "kalshi":
+            # One yes-side book per Kalshi market, keyed by its ticker.
+            return [{"token_id": link["market_id"], "outcome_index": 0}]
+        return tokens_by_market.get(link["market_id"], [])
 
     links_by_news: dict[tuple[str, datetime], list[dict[str, Any]]] = defaultdict(list)
     for link in links:
@@ -404,39 +459,50 @@ def run_builder(
         window_end = published_at + timedelta(
             seconds=POST_WINDOW_SECONDS + HORIZON_TOLERANCE_SECONDS
         )
-        envelope_index = repository.load_envelope_index(
-            window_start=window_start,
-            window_end=window_end,
-        )
-        token_ids = [
-            token["token_id"]
-            for link in news_links
-            for token in tokens_by_market.get(link["market_id"], [])
-        ]
-        trades_collected = trades_floor is not None and (
-            published_at + timedelta(seconds=POST_WINDOW_SECONDS) >= trades_floor
-        )
-        trade_stats = (
-            repository.load_trade_stats(
-                token_ids=token_ids,
-                window_start=published_at,
-                window_end=published_at + timedelta(seconds=POST_WINDOW_SECONDS),
-            )
-            if trades_collected
-            else None
-        )
         rows: list[dict[str, Any]] = []
+        links_by_platform: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for link in news_links:
-            rows.extend(
-                build_reaction_rows(
-                    link=link,
-                    tokens=tokens_by_market.get(link["market_id"], []),
-                    envelope_index=envelope_index,
-                    reader=reader,
-                    trade_stats=trade_stats,
-                    computed_at=started_at,
-                )
+            links_by_platform[link.get("platform", "polymarket")].append(link)
+        for platform, platform_links in sorted(links_by_platform.items()):
+            envelope_index = repository.load_envelope_index(
+                window_start=window_start,
+                window_end=window_end,
+                platform=platform,
             )
+            token_ids = [
+                token["token_id"]
+                for link in platform_links
+                for token in link_tokens(link)
+            ]
+            trades_floor = trades_floors[platform]
+            trades_collected = trades_floor is not None and (
+                published_at + timedelta(seconds=POST_WINDOW_SECONDS) >= trades_floor
+            )
+            if not trades_collected:
+                trade_stats = None
+            elif platform == "kalshi":
+                trade_stats = repository.load_kalshi_trade_stats(
+                    tickers=token_ids,
+                    window_start=published_at,
+                    window_end=published_at + timedelta(seconds=POST_WINDOW_SECONDS),
+                )
+            else:
+                trade_stats = repository.load_trade_stats(
+                    token_ids=token_ids,
+                    window_start=published_at,
+                    window_end=published_at + timedelta(seconds=POST_WINDOW_SECONDS),
+                )
+            for link in platform_links:
+                rows.extend(
+                    build_reaction_rows(
+                        link=link,
+                        tokens=link_tokens(link),
+                        envelope_index=envelope_index,
+                        reader=reader,
+                        trade_stats=trade_stats,
+                        computed_at=started_at,
+                    )
+                )
         repository.persist_reactions(rows)
         written += len(rows)
     print(f"Committed {written} reaction rows across {len(links)} links")

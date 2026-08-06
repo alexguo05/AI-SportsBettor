@@ -20,7 +20,10 @@ JOB_NAMESPACE = uuid.UUID("72a5f16f-d286-42ea-bc0a-62e7cf292193")
 ENRICH_NEWS = "enrich_news"
 RESOLVE_NEWS = "resolve_news"
 RESOLVE_MARKET = "resolve_market"
-SUPPORTED_JOB_TYPES = frozenset({ENRICH_NEWS, RESOLVE_NEWS, RESOLVE_MARKET})
+RESOLVE_KALSHI_MARKET = "resolve_kalshi_market"
+SUPPORTED_JOB_TYPES = frozenset(
+    {ENRICH_NEWS, RESOLVE_NEWS, RESOLVE_MARKET, RESOLVE_KALSHI_MARKET}
+)
 
 
 @dataclass(frozen=True)

@@ -205,7 +205,17 @@ def process_market_events(
     bank_version_id: str | None,
     batch: Batch,
     observed_at: datetime,
+    source_kind: str = "polymarket_market",
 ) -> None:
+    """Classify markets and resolve their entity mentions.
+
+    ``source_kind`` selects where mentions and classifications land:
+    ``polymarket_market`` (Gamma ids) or ``kalshi_market`` (tickers). Loaders
+    shape both platforms into the same event/market dicts, so everything else
+    is shared.
+    """
+    is_kalshi = source_kind == "kalshi_market"
+    event_label = "kalshi_event" if is_kalshi else "polymarket_event"
     for event in events:
         changed_markets = []
         fingerprints: dict[str, str] = {}
@@ -233,7 +243,7 @@ def process_market_events(
             except Exception as exc:
                 batch.failures.append(
                     {
-                        "source": "polymarket_event",
+                        "source": event_label,
                         "source_id": event["event_id"],
                         "market_ids": [market["market_id"] for market in market_chunk],
                         "error": f"{type(exc).__name__}: {exc}",
@@ -248,7 +258,9 @@ def process_market_events(
                     market = market_by_id[disposition.market_id]
                     fingerprint = fingerprints[disposition.market_id]
                     batch.classifications[disposition.market_id] = {
-                        "market_id": disposition.market_id,
+                        (
+                            "market_ticker" if is_kalshi else "market_id"
+                        ): disposition.market_id,
                         "source_content_sha256": market["source_content_sha256"],
                         "entity_input_sha256": fingerprint,
                         "market_topic": disposition.market_topic.value,
@@ -262,10 +274,13 @@ def process_market_events(
                         "updated_at": observed_at,
                     }
                     source = SourceReference(
-                        source_kind="polymarket_market",
+                        source_kind=source_kind,
                         source_id=market["market_id"],
                         source_content_sha256=market["source_content_sha256"],
-                        market_id=market["market_id"],
+                        market_id=None if is_kalshi else market["market_id"],
+                        kalshi_market_ticker=(
+                            market["market_id"] if is_kalshi else None
+                        ),
                     )
                     source_fields = {
                         "event_title": str(event["title"] or ""),
@@ -318,10 +333,42 @@ def process_market_events(
                                     ignored.mention_role,
                                 )
                             )
+                        elif disposition.ignore_group_item:
+                            # The extractor judged the label a non-entity (e.g.
+                            # Kalshi ladder phrases like "Over 10.5 1Q points
+                            # scored"); record it as ignored, not a failure.
+                            ignored = ExtractedMention(
+                                text=group_item,
+                                entity_type=EntityType.PERSON,
+                                person_role_hint=PersonRoleHint.UNKNOWN,
+                                mention_role=MentionRole.CANDIDATE,
+                                evidence=group_item,
+                                confidence=disposition.confidence,
+                                source_refs=["group_item_title"],
+                            )
+                            row = ignored_mention(
+                                text=group_item,
+                                reason=(
+                                    disposition.ignore_reason
+                                    or "extractor_ignored_group_item"
+                                ),
+                                mention=ignored,
+                                source=source,
+                                bank_version_id=bank_version_id,
+                                observed_at=observed_at,
+                            )
+                            batch.mentions[row["mention_id"]] = row
+                            processed_mentions.add(
+                                (
+                                    normalize_name(ignored.text),
+                                    ignored.entity_type,
+                                    ignored.mention_role,
+                                )
+                            )
                         elif disposition.group_item_entity_type is None:
                             batch.failures.append(
                                 {
-                                    "source": "polymarket_market",
+                                    "source": source_kind,
                                     "source_id": market["market_id"],
                                     "error": "group item was not typed by extractor",
                                 }
@@ -418,7 +465,7 @@ def process_market_events(
                         except Exception as exc:
                             batch.failures.append(
                                 {
-                                    "source": "polymarket_market",
+                                    "source": source_kind,
                                     "source_id": market["market_id"],
                                     "mention": mention.model_dump(mode="json"),
                                     "error": f"{type(exc).__name__}: {exc}",
@@ -607,6 +654,9 @@ def process_pending_mentions(
         elif row["polymarket_market_id"]:
             source_kind = "polymarket_market"
             source_id = row["polymarket_market_id"]
+        elif row.get("kalshi_market_ticker"):
+            source_kind = "kalshi_market"
+            source_id = row["kalshi_market_ticker"]
         else:
             source_kind = "polymarket_event"
             source_id = row["polymarket_event_id"]
@@ -617,6 +667,7 @@ def process_pending_mentions(
             news_id=row["news_id"],
             event_id=row["polymarket_event_id"],
             market_id=row["polymarket_market_id"],
+            kalshi_market_ticker=row.get("kalshi_market_ticker"),
         )
         batch.add_resolution(
             resolve_mention(

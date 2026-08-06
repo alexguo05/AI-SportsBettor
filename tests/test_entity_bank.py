@@ -1258,6 +1258,158 @@ def test_pending_unresolved_mention_reresolves_after_bank_change() -> None:
     assert resolved["last_bank_version_id"] == "new-bank"
 
 
+def kalshi_event(**market_overrides: Any) -> dict[str, Any]:
+    """A Kalshi event shaped as ResolutionRepository.load_kalshi_market_events
+    emits it: ticker in market_id/slug, market title in question,
+    yes_sub_title in group_item_title."""
+    market: dict[str, Any] = {
+        "market_id": "KXNFLGAME-26AUG15DALSEA-SEA",
+        "question": "Will Seattle win the Dallas vs Seattle Pro Football game?",
+        "slug": "KXNFLGAME-26AUG15DALSEA-SEA",
+        "group_item_title": "Seattle",
+        "group_item_threshold": None,
+        "sports_market_type": None,
+        "source_content_sha256": "d" * 64,
+        "prior_entity_input_sha256": None,
+        "prior_extractor_version": None,
+        "outcomes": ["Seattle"],
+    }
+    market.update(market_overrides)
+    return {
+        "event_id": "KXNFLGAME-26AUG15DALSEA",
+        "title": "Dallas at Seattle Winner",
+        "slug": "KXNFLGAME-26AUG15DALSEA",
+        "markets": [market],
+    }
+
+
+def test_kalshi_markets_produce_ticker_mentions_and_classifications() -> None:
+    batch = Batch()
+    process_market_events(
+        events=[kalshi_event()],
+        provider=DeterministicEntityProvider(),
+        index=CandidateIndex(
+            [
+                {
+                    "entity_id": "team-sea",
+                    "canonical_name": "Seattle Seahawks",
+                    "entity_type": "team",
+                    "identity_status": "canonical",
+                    "aliases": ["Seattle Seahawks", "Seattle", "SEA"],
+                    "roles": [],
+                    "teams": [],
+                }
+            ]
+        ),
+        bank_version_id="bank-1",
+        batch=batch,
+        observed_at=NOW,
+        source_kind="kalshi_market",
+    )
+
+    assert batch.failures == []
+    classification = batch.classifications["KXNFLGAME-26AUG15DALSEA-SEA"]
+    assert classification["market_ticker"] == "KXNFLGAME-26AUG15DALSEA-SEA"
+    assert "market_id" not in classification
+    assert batch.mentions
+    for mention in batch.mentions.values():
+        assert mention["kalshi_market_ticker"] == "KXNFLGAME-26AUG15DALSEA-SEA"
+        assert mention["polymarket_market_id"] is None
+        assert mention["polymarket_event_id"] is None
+    resolved = next(
+        row for row in batch.mentions.values() if row["mention_text"] == "Seattle"
+    )
+    assert resolved["entity_id"] == "team-sea"
+    assert resolved["resolution_status"] == "resolved"
+
+
+def test_kalshi_ignored_group_item_is_recorded_not_failed() -> None:
+    class IgnoringProvider(DeterministicEntityProvider):
+        def analyze_market_event(self, **kwargs: Any) -> ProviderResult:
+            result = super().analyze_market_event(**kwargs)
+            disposition = result.output.markets[0]
+            disposition.group_item_entity_type = None
+            disposition.group_item_person_role_hint = None
+            disposition.group_item_mention_role = None
+            disposition.ignore_group_item = True
+            disposition.ignore_reason = "ladder strike label, not an entity"
+            return result
+
+    batch = Batch()
+    process_market_events(
+        events=[
+            kalshi_event(
+                market_id="KXNFL1QTOTAL-26AUG06CARARI-11",
+                slug="KXNFL1QTOTAL-26AUG06CARARI-11",
+                question="Will there be over 10.5 1Q points scored?",
+                group_item_title="Over 10.5 1Q points scored",
+                group_item_threshold="10.5",
+                outcomes=["Over 10.5 1Q points scored"],
+            )
+        ],
+        provider=IgnoringProvider(),
+        index=CandidateIndex([]),
+        bank_version_id="bank-1",
+        batch=batch,
+        observed_at=NOW,
+        source_kind="kalshi_market",
+    )
+
+    assert batch.failures == []
+    ignored = next(iter(batch.mentions.values()))
+    assert ignored["resolution_status"] == "ignored"
+    assert ignored["mention_text"] == "Over 10.5 1Q points scored"
+    assert ignored["kalshi_market_ticker"] == "KXNFL1QTOTAL-26AUG06CARARI-11"
+    assert (
+        ignored["resolution_metadata"]["reason"]
+        == "ladder strike label, not an entity"
+    )
+
+
+def test_pending_kalshi_mention_keeps_its_ticker_source() -> None:
+    row = {
+        "mention_id": "kalshi-mention-id",
+        "news_id": None,
+        "polymarket_event_id": None,
+        "polymarket_market_id": None,
+        "kalshi_market_ticker": "KXNFLGAME-26AUG15DALSEA-SEA",
+        "entity_id": None,
+        "mention_text": "Josh Allen",
+        "normalized_text": "josh allen",
+        "entity_type_hint": "person",
+        "person_role_hint": "player",
+        "mention_role": "referenced",
+        "evidence": "Josh Allen",
+        "source_content_sha256": "a" * 64,
+        "extractor_version": "entity-extractor-v1",
+        "resolver_version": "entity-resolver-v1",
+        "resolution_status": "unresolved",
+        "match_method": None,
+        "confidence": 0,
+        "last_bank_version_id": "old-bank",
+        "candidate_entity_ids": [],
+        "resolution_metadata": {},
+        "first_observed_at": NOW,
+        "last_observed_at": NOW,
+        "created_at": NOW,
+        "updated_at": NOW,
+    }
+    batch = Batch()
+    process_pending_mentions(
+        rows=[row],
+        provider=DeterministicEntityProvider(),
+        index=CandidateIndex([candidate_row("entity-1", "Josh Allen")]),
+        bank_version_id="new-bank",
+        batch=batch,
+        observed_at=NOW,
+    )
+
+    resolved = next(iter(batch.mentions.values()))
+    assert resolved["entity_id"] == "entity-1"
+    assert resolved["kalshi_market_ticker"] == "KXNFLGAME-26AUG15DALSEA-SEA"
+    assert resolved["polymarket_market_id"] is None
+
+
 def test_live_write_commands_require_explicit_confirmation() -> None:
     assert nflverse_sync_main(["--apply"]) == 2
     assert gamma_backfill_main(["--apply"]) == 2

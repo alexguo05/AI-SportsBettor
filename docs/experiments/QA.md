@@ -9,6 +9,18 @@ results.
 
 ---
 
+**2026-08-05 — Post-deploy audit: do Kalshi envelopes match the database?**
+Yes, zero mismatches. Order books: envelope and DB rows for the same ingest
+run are identical ticker sets (6,093), with sampled bid/ask/midpoint/spread,
+full ladders, and notionals equal. Structure: 6,103 raw API markets vs DB
+rows equal on status/prices/volume/OI. Trades: all 29 envelope trades present
+with matching fields (table: 364 trades, 128 tickers, first ~2h). Gap
+confirmed: entity matching and linking do NOT see Kalshi — `entity_mentions`
+has only `polymarket_market_id`/`polymarket_event_id` columns, `job_outbox`
+has zero Kalshi jobs, and `news_market_links` joins only Polymarket tables.
+Kalshi markets need their own resolve_market wiring to enter the linking
+layer.
+
 **2026-08-05 — Is there more liquidity on Kalshi? How much?**
 For NFL games, yes: Pantera study (282 games, Sep 2025–Jan 2026) measured
 Kalshi $1.3B vs Polymarket $359M notional (3.6x), ~19k vs ~2.7k trades/game

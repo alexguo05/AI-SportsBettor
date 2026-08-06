@@ -21,6 +21,7 @@ from sqlalchemy import select
 
 from src.db.engine import DatabaseResources, create_database_resources
 from src.db.models import (
+    kalshi_markets,
     news_enrichments,
     news_events,
     news_market_links,
@@ -67,6 +68,33 @@ class ExportRepository:
         until: datetime | None,
         label_version: str = LABEL_VERSION,
     ) -> list[dict[str, Any]]:
+        """Reaction rows joined to their platform's market metadata, merged
+        into one normalized shape and re-sorted chronologically."""
+        rows = [
+            *self._load_polymarket_rows(
+                since=since, until=until, label_version=label_version
+            ),
+            *self._load_kalshi_rows(
+                since=since, until=until, label_version=label_version
+            ),
+        ]
+        rows.sort(
+            key=lambda row: (
+                row["published_at"],
+                row["news_id"],
+                row["market_id"],
+                row["token_id"],
+            )
+        )
+        return rows
+
+    def _load_polymarket_rows(
+        self,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        label_version: str,
+    ) -> list[dict[str, Any]]:
         statement = (
             select(
                 news_market_reactions,
@@ -103,22 +131,86 @@ class ExportRepository:
                 polymarket_tokens,
                 polymarket_tokens.c.token_id == news_market_reactions.c.token_id,
             )
-            .order_by(
-                news_market_reactions.c.published_at,
-                news_market_reactions.c.news_id,
-                news_market_reactions.c.market_id,
-                news_market_reactions.c.token_id,
-            )
         )
         statement = statement.where(
-            news_market_reactions.c.label_version == label_version
+            news_market_reactions.c.label_version == label_version,
+            news_market_reactions.c.platform == "polymarket",
         )
         if since is not None:
             statement = statement.where(news_market_reactions.c.published_at >= since)
         if until is not None:
             statement = statement.where(news_market_reactions.c.published_at < until)
         with self.resources.engine.connect() as connection:
-            return [dict(row) for row in connection.execute(statement).mappings()]
+            return [
+                {**row, "market_result": None, "settlement_value": None}
+                for row in connection.execute(statement).mappings()
+            ]
+
+    def _load_kalshi_rows(
+        self,
+        *,
+        since: datetime | None,
+        until: datetime | None,
+        label_version: str,
+    ) -> list[dict[str, Any]]:
+        statement = (
+            select(
+                news_market_reactions,
+                news_market_links.c.event_id,
+                news_market_links.c.shared_entity_ids,
+                news_market_links.c.shared_entity_count,
+                news_market_links.c.news_mention_roles,
+                news_market_links.c.market_mention_roles,
+                news_market_links.c.market_topic,
+                news_market_links.c.contract_type,
+                news_market_links.c.market_open_at_publish,
+                news_market_links.c.linker_version,
+                news_events.c.author_username,
+                news_events.c.text,
+                kalshi_markets.c.title.label("question"),
+                kalshi_markets.c.yes_sub_title.label("group_item_title"),
+                kalshi_markets.c.floor_strike.label("line"),
+                kalshi_markets.c.result.label("market_result"),
+                kalshi_markets.c.settlement_value,
+            )
+            .join(
+                news_market_links,
+                (news_market_links.c.news_id == news_market_reactions.c.news_id)
+                & (news_market_links.c.market_id == news_market_reactions.c.market_id),
+            )
+            .join(news_events, news_events.c.news_id == news_market_reactions.c.news_id)
+            .join(
+                kalshi_markets,
+                kalshi_markets.c.ticker == news_market_reactions.c.market_id,
+            )
+        )
+        statement = statement.where(
+            news_market_reactions.c.label_version == label_version,
+            news_market_reactions.c.platform == "kalshi",
+        )
+        if since is not None:
+            statement = statement.where(news_market_reactions.c.published_at >= since)
+        if until is not None:
+            statement = statement.where(news_market_reactions.c.published_at < until)
+        with self.resources.engine.connect() as connection:
+            rows = []
+            for row in connection.execute(statement).mappings():
+                result = row["market_result"] or None
+                rows.append(
+                    {
+                        **row,
+                        "sports_market_type": None,
+                        "uma_resolution_status": None,
+                        "market_result": result,
+                        # Reaction rows are the yes side (outcome_index 0), so
+                        # winning_outcome_index follows the same convention.
+                        "winning_outcome_index": (
+                            {"yes": 0, "no": 1}.get(result) if result else None
+                        ),
+                        "outcome": "Yes",
+                    }
+                )
+            return rows
 
     def load_enrichments(self, news_ids: list[str]) -> dict[str, dict[str, Any]]:
         """Latest completed enrichment per tweet."""
@@ -166,6 +258,7 @@ def build_dataset_rows(
                 "claims": _json_text(enrichment.get("claims")),
                 "market_id": row["market_id"],
                 "event_id": row["event_id"],
+                "platform": row.get("platform", "polymarket"),
                 "question": row["question"],
                 "sports_market_type": row["sports_market_type"],
                 "group_item_title": row["group_item_title"],
@@ -200,6 +293,8 @@ def build_dataset_rows(
                 "snapshot_count": row["snapshot_count"],
                 "max_gap_seconds": _float(row["max_gap_seconds"]),
                 "uma_resolution_status": row["uma_resolution_status"],
+                "market_result": row.get("market_result"),
+                "settlement_value": _float(row.get("settlement_value")),
                 "winning_outcome_index": winning_index,
                 "outcome_won": (
                     winning_index == row["outcome_index"]

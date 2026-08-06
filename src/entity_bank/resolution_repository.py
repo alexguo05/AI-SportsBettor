@@ -18,6 +18,9 @@ from src.db.models import (
     entity_relationships,
     entity_resolution_attempts,
     entity_roles,
+    kalshi_events,
+    kalshi_market_classifications,
+    kalshi_markets,
     news_enrichments,
     news_entity_resolution_runs,
     news_events,
@@ -144,6 +147,103 @@ class ResolutionRepository:
             {**event, "markets": list(event["markets"].values())}
             for event in events.values()
         ]
+
+    def load_kalshi_market_events(
+        self,
+        *,
+        event_limit: int,
+        event_tickers: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Shape Kalshi events into the ``process_market_events`` input dicts.
+
+        Field mapping: market ``title`` (a full question) -> ``question``,
+        ``yes_sub_title`` (the candidate label) -> ``group_item_title``,
+        tickers -> slugs, strikes -> ``group_item_threshold``.
+        """
+        statement = (
+            select(
+                kalshi_events.c.event_ticker,
+                kalshi_events.c.title.label("event_title"),
+                kalshi_markets.c.ticker,
+                kalshi_markets.c.title.label("market_title"),
+                kalshi_markets.c.yes_sub_title,
+                kalshi_markets.c.no_sub_title,
+                kalshi_markets.c.floor_strike,
+                kalshi_markets.c.cap_strike,
+                kalshi_markets.c.functional_strike,
+                kalshi_markets.c.current_content_sha256,
+                kalshi_market_classifications.c.entity_input_sha256.label(
+                    "prior_entity_input_sha256"
+                ),
+                kalshi_market_classifications.c.extractor_version.label(
+                    "prior_extractor_version"
+                ),
+            )
+            .join(
+                kalshi_markets,
+                kalshi_markets.c.event_ticker == kalshi_events.c.event_ticker,
+            )
+            .outerjoin(
+                kalshi_market_classifications,
+                kalshi_market_classifications.c.market_ticker
+                == kalshi_markets.c.ticker,
+            )
+            .where(
+                kalshi_events.c.missing_since.is_(None),
+                kalshi_markets.c.missing_since.is_(None),
+            )
+            .order_by(kalshi_events.c.event_ticker, kalshi_markets.c.ticker)
+        )
+        if event_tickers:
+            statement = statement.where(
+                kalshi_events.c.event_ticker.in_(sorted(event_tickers))
+            )
+        with self.resources.engine.connect() as connection:
+            rows = connection.execute(statement).mappings().all()
+
+        events: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            event_ticker = row["event_ticker"]
+            if event_ticker not in events:
+                if len(events) >= event_limit:
+                    continue
+                events[event_ticker] = {
+                    "event_id": event_ticker,
+                    "title": row["event_title"],
+                    "slug": event_ticker,
+                    "markets": [],
+                }
+            event = events.get(event_ticker)
+            if event is None:
+                continue
+            if row["functional_strike"]:
+                threshold = str(row["functional_strike"])
+            else:
+                strikes = [
+                    str(value)
+                    for value in (row["floor_strike"], row["cap_strike"])
+                    if value is not None
+                ]
+                threshold = "-".join(strikes) or None
+            outcomes: list[str] = []
+            for sub_title in (row["yes_sub_title"], row["no_sub_title"]):
+                if sub_title and sub_title not in outcomes:
+                    outcomes.append(sub_title)
+            event["markets"].append(
+                {
+                    "market_id": row["ticker"],
+                    "question": row["market_title"],
+                    "slug": row["ticker"],
+                    "group_item_title": row["yes_sub_title"],
+                    "group_item_threshold": threshold,
+                    "sports_market_type": None,
+                    "source_content_sha256": row["current_content_sha256"],
+                    "prior_entity_input_sha256": row["prior_entity_input_sha256"],
+                    "prior_extractor_version": row["prior_extractor_version"],
+                    "outcomes": outcomes,
+                }
+            )
+        return list(events.values())
 
     def load_news(
         self,
@@ -381,7 +481,15 @@ class ResolutionRepository:
                     alias_rows,
                 )
             classification_rows = batch.get("classifications", [])
-            if classification_rows:
+            # Kalshi rows are keyed by market_ticker, Polymarket rows by
+            # market_id; route each to its own table.
+            polymarket_rows = [
+                row for row in classification_rows if "market_ticker" not in row
+            ]
+            kalshi_rows = [
+                row for row in classification_rows if "market_ticker" in row
+            ]
+            if polymarket_rows:
                 statement = insert(polymarket_market_classifications)
                 connection.execute(
                     statement.on_conflict_do_update(
@@ -400,7 +508,28 @@ class ResolutionRepository:
                             )
                         },
                     ),
-                    classification_rows,
+                    polymarket_rows,
+                )
+            if kalshi_rows:
+                statement = insert(kalshi_market_classifications)
+                connection.execute(
+                    statement.on_conflict_do_update(
+                        index_elements=[kalshi_market_classifications.c.market_ticker],
+                        set_={
+                            column.name: getattr(statement.excluded, column.name)
+                            for column in (
+                                kalshi_market_classifications.c.source_content_sha256,
+                                kalshi_market_classifications.c.entity_input_sha256,
+                                kalshi_market_classifications.c.market_topic,
+                                kalshi_market_classifications.c.contract_type,
+                                kalshi_market_classifications.c.extractor_version,
+                                kalshi_market_classifications.c.confidence,
+                                kalshi_market_classifications.c.classification_metadata,
+                                kalshi_market_classifications.c.updated_at,
+                            )
+                        },
+                    ),
+                    kalshi_rows,
                 )
             mention_rows = batch.get("mentions", [])
             if mention_rows:

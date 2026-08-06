@@ -11,6 +11,8 @@ from sqlalchemy import exists, func, inspect, select
 
 from src.db.engine import create_database_resources
 from src.db.models import (
+    kalshi_events,
+    kalshi_markets,
     news_enrichments,
     news_entity_resolution_runs,
     news_events,
@@ -23,6 +25,7 @@ from src.entity_bank.prompt import EXTRACTOR_VERSION
 from src.jobs.repository import (
     ENRICH_NEWS,
     JOB_CHANNEL,
+    RESOLVE_KALSHI_MARKET,
     RESOLVE_MARKET,
     RESOLVE_NEWS,
     enqueue_job,
@@ -105,10 +108,24 @@ def main(argv: list[str] | None = None) -> int:
         .group_by(polymarket_events.c.event_id)
         .order_by(polymarket_events.c.event_id)
     )
+    kalshi_statement = (
+        select(kalshi_events.c.event_ticker)
+        .join(
+            kalshi_markets,
+            kalshi_markets.c.event_ticker == kalshi_events.c.event_ticker,
+        )
+        .where(
+            kalshi_events.c.missing_since.is_(None),
+            kalshi_markets.c.missing_since.is_(None),
+        )
+        .group_by(kalshi_events.c.event_ticker)
+        .order_by(kalshi_events.c.event_ticker)
+    )
     if args.limit is not None:
         enrichment_statement = enrichment_statement.limit(args.limit)
         resolution_statement = resolution_statement.limit(args.limit)
         market_statement = market_statement.limit(args.limit)
+        kalshi_statement = kalshi_statement.limit(args.limit)
     try:
         with resources.engine.connect() as connection:
             inspector = inspect(connection)
@@ -147,11 +164,13 @@ def main(argv: list[str] | None = None) -> int:
                 resolution_statement
             ).mappings().all()
             event_ids = list(connection.scalars(market_statement))
+            kalshi_event_tickers = list(connection.scalars(kalshi_statement))
         summary = {
             "dry_run": not args.apply,
             "enrichment_jobs": len(news_ids),
             "news_resolution_jobs": len(resolution_rows),
             "market_resolution_jobs": len(event_ids),
+            "kalshi_market_resolution_jobs": len(kalshi_event_tickers),
             "enrichment_version": settings.enrichment_version,
             "news_extractor_version": ENTITY_EXTRACTOR_VERSION,
             "market_extractor_version": EXTRACTOR_VERSION,
@@ -202,6 +221,20 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         payload={
                             "event_id": event_id,
+                            "extractor_version": EXTRACTOR_VERSION,
+                        },
+                        priority=5,
+                        notify=False,
+                    )
+                for event_ticker in kalshi_event_tickers:
+                    enqueue_job(
+                        connection,
+                        job_type=RESOLVE_KALSHI_MARKET,
+                        idempotency_key=(
+                            f"{event_ticker}:seed:{EXTRACTOR_VERSION}"
+                        ),
+                        payload={
+                            "event_ticker": event_ticker,
                             "extractor_version": EXTRACTOR_VERSION,
                         },
                         priority=5,

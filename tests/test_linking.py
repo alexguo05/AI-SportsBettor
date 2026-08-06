@@ -211,6 +211,41 @@ def test_linker_repository_upserts_prunes_and_checkpoints() -> None:
     assert "excluded.last_successful_poll_at >= ingest_cursors.last_successful_poll_at" in sql
 
 
+def test_links_carry_their_platform() -> None:
+    rows = build_links(
+        [news_mention()],
+        [
+            market_mention(),
+            market_mention(
+                market_id="KXNFLGAME-26AUG15DALSEA-SEA",
+                event_id="KXNFLGAME-26AUG15DALSEA",
+                platform="kalshi",
+            ),
+        ],
+    )
+    platforms = {row["market_id"]: row["platform"] for row in rows}
+    assert platforms == {
+        "m-1": "polymarket",
+        "KXNFLGAME-26AUG15DALSEA-SEA": "kalshi",
+    }
+
+
+def test_market_mentions_query_both_platforms() -> None:
+    connection = FakeConnection()
+    resources = SimpleNamespace(engine=FakeEngine(connection), close=lambda: None)
+    repository = LinkerRepository(resources)  # type: ignore[arg-type]
+
+    assert repository.load_market_mentions() == []
+
+    sql = compiled_sql(connection)
+    assert "entity_mentions.polymarket_market_id IS NOT NULL" in sql
+    assert "entity_mentions.kalshi_market_ticker IS NOT NULL" in sql
+    assert "JOIN kalshi_markets" in sql
+    assert "kalshi_market_classifications" in sql
+    assert "kalshi_markets.settlement_ts" in sql
+    assert "kalshi_markets.close_time" in sql
+
+
 def envelope_item(offset_seconds: int, run_id: str) -> dict[str, Any]:
     return {
         "ingest_run_id": run_id,
@@ -425,6 +460,75 @@ def test_envelope_reader_handles_gzip_and_transcoded_payloads_with_cache() -> No
         assert client.downloads == 1
 
 
+def test_envelope_reader_keys_kalshi_records_by_ticker() -> None:
+    envelope = {
+        "records": [
+            {
+                "ticker": "KXNFLGAME-26AUG15DALSEA-SEA",
+                "midpoint": "0.59",
+                "spread": "0.02",
+                "bid_captured_notional": "5000.00",
+                "ask_captured_notional": "6100.00",
+            }
+        ]
+    }
+    reader, _client = _reader_with_payload(json.dumps(envelope).encode("utf-8"))
+    books = reader.fetch_books("run-k", "gs://bucket/kalshi.json.gz")
+    assert books == {
+        "KXNFLGAME-26AUG15DALSEA-SEA": {
+            "midpoint": "0.59",
+            "spread": "0.02",
+            "bid_depth": "5000.00",
+            "ask_depth": "6100.00",
+        }
+    }
+
+
+def test_kalshi_reaction_rows_use_ticker_token_and_platform() -> None:
+    ticker = "KXNFLGAME-26AUG15DALSEA-SEA"
+    link = {
+        "news_id": "x:200",
+        "market_id": ticker,
+        "platform": "kalshi",
+        "published_at": NOW,
+    }
+    index = [envelope_item(-15, "baseline"), envelope_item(70, "plus-1m")]
+    reader = FakeReader(
+        {
+            "baseline": {ticker: book("0.55")},
+            "plus-1m": {ticker: book("0.61")},
+        }
+    )
+    rows = build_reaction_rows(
+        link=link,
+        tokens=[{"token_id": ticker, "outcome_index": 0}],
+        envelope_index=index,
+        reader=reader,
+        trade_stats={ticker: (4, Decimal("310"))},
+        computed_at=NOW + timedelta(hours=3),
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["platform"] == "kalshi"
+    assert row["token_id"] == ticker
+    assert row["outcome_index"] == 0
+    assert row["baseline_midpoint"] == Decimal("0.55")
+    assert row["delta_plus_1m"] == Decimal("0.06")
+    assert row["trade_count"] == 4
+    assert row["trade_notional"] == Decimal("310")
+
+    # Polymarket links default the platform.
+    default_rows = build_reaction_rows(
+        link={"news_id": "x:200", "market_id": "m-1", "published_at": NOW},
+        tokens=[{"token_id": "t-yes", "outcome_index": 0}],
+        envelope_index=[],
+        reader=FakeReader({}),
+        trade_stats=None,
+        computed_at=NOW,
+    )
+    assert default_rows[0]["platform"] == "polymarket"
+
+
 def test_reactions_repository_sql_is_idempotent() -> None:
     connection = FakeConnection()
     resources = SimpleNamespace(engine=FakeEngine(connection), close=lambda: None)
@@ -518,11 +622,35 @@ def test_dataset_rows_flatten_values_and_derive_outcome_won() -> None:
     assert json.loads(row["shared_entity_ids"]) == ["entity-1"]
     assert row["published_at"] == NOW.isoformat()
     assert row["summary"] == "Injury update"
+    assert row["platform"] == "polymarket"
+    assert row["market_result"] is None
+    assert row["settlement_value"] is None
 
     dataset_unresolved = build_dataset_rows(
         [{**rows[0], "winning_outcome_index": None}], enrichments
     )
     assert dataset_unresolved[0]["outcome_won"] is None
+
+    kalshi_dataset = build_dataset_rows(
+        [
+            {
+                **rows[0],
+                "market_id": "KXNFLGAME-26AUG15DALSEA-SEA",
+                "platform": "kalshi",
+                "token_id": "KXNFLGAME-26AUG15DALSEA-SEA",
+                "market_result": "yes",
+                "settlement_value": Decimal("1.0000"),
+                "winning_outcome_index": 0,
+            }
+        ],
+        enrichments,
+    )
+    kalshi_row = kalshi_dataset[0]
+    assert kalshi_row["platform"] == "kalshi"
+    assert kalshi_row["market_result"] == "yes"
+    assert kalshi_row["settlement_value"] == 1.0
+    # The reaction row is the yes side, so result "yes" means the outcome won.
+    assert kalshi_row["outcome_won"] is True
 
 
 def label(

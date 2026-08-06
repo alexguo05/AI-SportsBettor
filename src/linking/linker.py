@@ -27,13 +27,15 @@ from src.db.engine import DatabaseResources, create_database_resources
 from src.db.models import (
     entity_mentions,
     ingest_cursors,
+    kalshi_market_classifications,
+    kalshi_markets,
     news_events,
     news_market_links,
     polymarket_market_classifications,
     polymarket_markets,
 )
 
-LINKER_VERSION = "entity_overlap_v1"
+LINKER_VERSION = "entity_overlap_v2"
 LINKER_CURSOR_SOURCE = "linking"
 LINKER_CURSOR_STREAM = "news_market_links"
 RESOLVED_STATUS = "resolved"
@@ -68,6 +70,7 @@ class MarketMention:
     first_observed_at: datetime | None
     market_topic: str | None
     contract_type: str | None
+    platform: str = "polymarket"
 
 
 def market_final_before(mention: MarketMention, published_at: datetime) -> bool:
@@ -149,6 +152,7 @@ def build_links(
                 "news_id": news_id,
                 "market_id": market_id,
                 "event_id": market_mention.event_id,
+                "platform": market_mention.platform,
                 "published_at": published_at,
                 "shared_entity_ids": shared_entity_ids,
                 "shared_entity_count": len(shared_entity_ids),
@@ -204,6 +208,12 @@ class LinkerRepository:
             ]
 
     def load_market_mentions(self) -> list[MarketMention]:
+        return [
+            *self._load_polymarket_market_mentions(),
+            *self._load_kalshi_market_mentions(),
+        ]
+
+    def _load_polymarket_market_mentions(self) -> list[MarketMention]:
         statement = (
             select(
                 entity_mentions.c.polymarket_market_id,
@@ -247,6 +257,59 @@ class LinkerRepository:
                     first_observed_at=row.first_observed_at,
                     market_topic=row.market_topic,
                     contract_type=row.contract_type,
+                    platform="polymarket",
+                )
+                for row in connection.execute(statement)
+            ]
+
+    def _load_kalshi_market_mentions(self) -> list[MarketMention]:
+        # Kalshi analogs: close_time is the scheduled end of trading and
+        # settlement_ts is the actual settlement, so either one preceding the
+        # tweet makes the market final.
+        statement = (
+            select(
+                entity_mentions.c.kalshi_market_ticker,
+                entity_mentions.c.entity_id,
+                entity_mentions.c.mention_role,
+                entity_mentions.c.person_role_hint,
+                kalshi_markets.c.event_ticker,
+                kalshi_markets.c.close_time,
+                kalshi_markets.c.settlement_ts,
+                kalshi_markets.c.first_observed_at,
+                kalshi_market_classifications.c.market_topic,
+                kalshi_market_classifications.c.contract_type,
+            )
+            .join(
+                kalshi_markets,
+                kalshi_markets.c.ticker == entity_mentions.c.kalshi_market_ticker,
+            )
+            .join(
+                kalshi_market_classifications,
+                kalshi_market_classifications.c.market_ticker
+                == kalshi_markets.c.ticker,
+                isouter=True,
+            )
+            .where(
+                entity_mentions.c.kalshi_market_ticker.is_not(None),
+                entity_mentions.c.resolution_status == RESOLVED_STATUS,
+                entity_mentions.c.entity_id.is_not(None),
+            )
+            .order_by(entity_mentions.c.kalshi_market_ticker)
+        )
+        with self.resources.engine.connect() as connection:
+            return [
+                MarketMention(
+                    market_id=row.kalshi_market_ticker,
+                    entity_id=row.entity_id,
+                    mention_role=row.mention_role,
+                    person_role_hint=row.person_role_hint,
+                    event_id=row.event_ticker,
+                    closed_time=row.close_time,
+                    resolution_observed_at=row.settlement_ts,
+                    first_observed_at=row.first_observed_at,
+                    market_topic=row.market_topic,
+                    contract_type=row.contract_type,
+                    platform="kalshi",
                 )
                 for row in connection.execute(statement)
             ]
@@ -281,6 +344,7 @@ class LinkerRepository:
                             column: getattr(statement.excluded, column)
                             for column in (
                                 "event_id",
+                                "platform",
                                 "published_at",
                                 "shared_entity_ids",
                                 "shared_entity_count",

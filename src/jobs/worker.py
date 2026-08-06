@@ -26,6 +26,7 @@ from src.entity_bank.resolver import CandidateIndex
 from src.entity_bank.worker import Batch, process_market_events, process_news
 from src.jobs.repository import (
     ENRICH_NEWS,
+    RESOLVE_KALSHI_MARKET,
     RESOLVE_MARKET,
     RESOLVE_NEWS,
     SUPPORTED_JOB_TYPES,
@@ -113,6 +114,8 @@ class WorkerRuntime:
             return self._handle_resolve_news(job)
         if job.job_type == RESOLVE_MARKET:
             return self._handle_resolve_market(job)
+        if job.job_type == RESOLVE_KALSHI_MARKET:
+            return self._handle_resolve_kalshi_market(job)
         raise ValueError(f"unsupported job type: {job.job_type}")
 
     def _handle_enrich_news(self, job: JobRecord) -> JobResult:
@@ -224,6 +227,44 @@ class WorkerRuntime:
             "completed",
             {
                 "event_id": job.payload["event_id"],
+                "markets": len(batch.classifications),
+                "mentions": len(batch.mentions),
+                "input_tokens": batch.input_tokens,
+                "output_tokens": batch.output_tokens,
+            },
+        )
+
+    def _handle_resolve_kalshi_market(self, job: JobRecord) -> JobResult:
+        bank_version_id, index = self.resolution_context()
+        events = self.resolution_repository.load_kalshi_market_events(
+            event_limit=1,
+            event_tickers={str(job.payload["event_ticker"])},
+        )
+        if not events:
+            return JobResult(job.job_id, job.job_type, "not_active", {})
+        _, provider = self._providers()
+        batch = Batch()
+        with self.market_slots:
+            process_market_events(
+                events=events,
+                provider=provider,
+                index=index,
+                bank_version_id=bank_version_id,
+                batch=batch,
+                observed_at=datetime.now(UTC),
+                source_kind="kalshi_market",
+            )
+        if batch.failures:
+            raise RuntimeError(json.dumps(batch.failures, default=str))
+        self.resolution_repository.persist_batch(batch.as_repository_batch())
+        if batch.provisional_entities:
+            self.invalidate_candidates()
+        return JobResult(
+            job.job_id,
+            job.job_type,
+            "completed",
+            {
+                "event_ticker": job.payload["event_ticker"],
                 "markets": len(batch.classifications),
                 "mentions": len(batch.mentions),
                 "input_tokens": batch.input_tokens,

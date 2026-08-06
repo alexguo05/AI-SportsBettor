@@ -54,6 +54,7 @@ class SourceReference:
     event_id: str | None = None
     market_id: str | None = None
     news_id: str | None = None
+    kalshi_market_ticker: str | None = None
 
 
 class CandidateIndex:
@@ -339,6 +340,7 @@ def resolve_mention(
             source.event_id if source.source_kind == "polymarket_event" else None
         ),
         "polymarket_market_id": source.market_id,
+        "kalshi_market_ticker": source.kalshi_market_ticker,
         "entity_id": decision.entity_id,
         "mention_text": mention.text,
         "normalized_text": normalized,
@@ -420,6 +422,7 @@ def ignored_mention(
         "news_id": source.news_id,
         "polymarket_event_id": None,
         "polymarket_market_id": source.market_id,
+        "kalshi_market_ticker": source.kalshi_market_ticker,
         "entity_id": None,
         "mention_text": text,
         "normalized_text": normalize_name(text),

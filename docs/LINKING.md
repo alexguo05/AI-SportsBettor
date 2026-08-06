@@ -1,9 +1,15 @@
 # Tweet-Market Linking and Label Construction
 
 This layer turns the collected raw data into training examples. It joins
-tweets to the Polymarket markets they may affect, measures how prices moved
-after each tweet, and exports the result as a flat dataset a training run
-can consume directly.
+tweets to the Polymarket and Kalshi markets they may affect, measures how
+prices moved after each tweet, and exports the result as a flat dataset a
+training run can consume directly.
+
+Both platforms flow through the same pipeline: `news_market_links` and
+`news_market_reactions` carry a `platform` column (`polymarket` /
+`kalshi`), `market_id` holds the Gamma id or the Kalshi ticker, and for
+Kalshi `token_id` is the market ticker itself (one yes-side book per
+market, `outcome_index` 0).
 
 Everything here is derived and rebuildable: the inputs (tweets, mentions,
 order-book envelopes, trades, resolutions) are durably collected by the
@@ -42,11 +48,14 @@ Per `(news_id, market_id)` pair, `news_market_links` stores:
 - `market_open_at_publish` — false when the market was first observed only
   after the tweet published (the market may not have existed yet). The link
   is kept, flagged.
-- `linker_version` — currently `entity_overlap_v1`.
+- `platform` — which exchange the market belongs to.
+- `linker_version` — currently `entity_overlap_v2` (platform-aware).
 
 The only exclusion: markets that were provably final before the tweet
-published (`closed_time` or `resolution_observed_at` earlier than
-`published_at`), because no price reaction can exist for them.
+published, because no price reaction can exist for them. For Polymarket
+that means `closed_time` or `resolution_observed_at` earlier than
+`published_at`; for Kalshi, `close_time` (scheduled end of trading) or
+`settlement_ts` (actual settlement).
 
 Each run recomputes the full link set and upserts it, then prunes rows that
 were not regenerated (their mention resolution changed or the market became
@@ -88,8 +97,15 @@ Trust signals per row instead of failures:
 - Missing snapshots or tokens absent from an envelope leave the midpoint
   NULL rather than inventing a price.
 - `trade_count` / `trade_notional` — executed volume in the 2-hour window
-  from `polymarket_trades`. NULL when the window predates trade collection
-  (before 2026-08-04); zero means trades were collected and none occurred.
+  from `polymarket_trades` (or `kalshi_trades`, where notional is
+  `yes_price * count`). NULL when the window predates that platform's trade
+  collection (Polymarket 2026-08-04, Kalshi 2026-08-05); zero means trades
+  were collected and none occurred.
+
+Envelopes are selected per platform: Polymarket links read the
+`(polymarket, clob, order-books)` stream and Kalshi links the
+`(kalshi, trade-api, order-books)` stream, whose records carry the same
+midpoint/spread/depth fields keyed by ticker instead of token id.
 
 `--limit N` caps the number of links labeled in one run.
 
@@ -99,6 +115,13 @@ Joins tweet text, the latest completed enrichment (summary, claims,
 usefulness), link features, reaction labels, and the market's final
 resolution into one row per (tweet, market, outcome token). Writes JSONL
 and parquet under `data/local/datasets/` by default.
+
+The export is platform-aware: every row carries `platform`, and Kalshi rows
+map their fields into the shared schema (`question` ← market title,
+`group_item_title` ← `yes_sub_title`, `line` ← `floor_strike`,
+`market_result`/`settlement_value` ← Kalshi settlement, with
+`winning_outcome_index` 0 for a `yes` result so `outcome_won` works
+unchanged; `uma_resolution_status` stays NULL).
 
 - `--since` / `--until` bound the tweet publish time.
 - `--format jsonl|parquet|both` (default both).
