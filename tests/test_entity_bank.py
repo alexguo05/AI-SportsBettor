@@ -1515,3 +1515,40 @@ def test_accuracy_sweep_writes_durable_gcs_outputs() -> None:
     assert json.loads(findings)["mention_id"] == "mention-1"
     assert progress_type == "application/json"
     assert findings_type == "application/x-ndjson"
+
+
+def test_persist_batch_strips_created_at_so_mixed_mention_rows_share_keys() -> None:
+    from types import SimpleNamespace
+
+    from src.entity_bank.resolution_repository import ResolutionRepository
+
+    executed: list[tuple[Any, Any]] = []
+
+    class FakePersistConnection:
+        def execute(self, statement: Any, rows: Any = None) -> Any:
+            executed.append((statement, rows))
+            return SimpleNamespace(rowcount=0)
+
+    class FakePersistBegin:
+        def __enter__(self) -> FakePersistConnection:
+            return FakePersistConnection()
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    engine = SimpleNamespace(begin=lambda: FakePersistBegin())
+    repository = ResolutionRepository(
+        SimpleNamespace(engine=engine, close=lambda: None)  # type: ignore[arg-type]
+    )
+
+    # A retried mention loaded from the database carries created_at; a fresh
+    # extraction does not. The upsert must see homogeneous keys.
+    retried = {"mention_id": "m-1", "created_at": NOW, "updated_at": NOW}
+    fresh = {"mention_id": "m-2", "updated_at": NOW}
+    repository.persist_batch({"mentions": [retried, fresh]})
+
+    mention_rows = next(rows for _, rows in executed if rows is not None)
+    assert [set(row) for row in mention_rows] == [
+        {"mention_id", "updated_at"},
+        {"mention_id", "updated_at"},
+    ]

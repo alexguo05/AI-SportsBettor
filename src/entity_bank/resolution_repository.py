@@ -531,7 +531,13 @@ class ResolutionRepository:
                     ),
                     kalshi_rows,
                 )
-            mention_rows = batch.get("mentions", [])
+            # Retried mentions are full table rows (including created_at) while
+            # freshly extracted ones are not; executemany requires homogeneous
+            # keys, and created_at belongs to the insert default anyway.
+            mention_rows = [
+                {key: value for key, value in row.items() if key != "created_at"}
+                for row in batch.get("mentions", [])
+            ]
             if mention_rows:
                 statement = insert(entity_mentions)
                 connection.execute(
