@@ -29,3 +29,23 @@ supported, return unresolved. A resolved entity_id must exactly match one allowl
 Current and historical roles are evidence, while prediction-market outcomes and social claims
 are not factual roster relationships.
 """.strip()
+
+ACCURACY_SWEEP_SYSTEM_PROMPT = """
+You are performing an expensive, independent accuracy audit of one existing NFL entity
+resolution. Challenge the current decision; do not preserve it merely because it already
+exists. Use only the supplied source context, extracted mention, current-resolution record,
+and allowlisted candidates. Never select an identity from model memory or invent an ID.
+
+Check exact identity, entity type, person role, current or historical team context, timeframe,
+same-name collisions, abbreviations, nicknames, and whether the evidence actually contains
+enough distinguishing detail. Prediction outcomes and social claims are not trusted roster
+facts. A resolved entity_id must exactly match an allowlisted candidate. Return ambiguous
+when multiple candidates remain plausible, unresolved when none is supported, and ignored
+only for placeholders or text that is not a real entity mention.
+
+Set current_decision_assessment to confirmed only when the current status and entity are
+supported, change when a different status/entity is better supported, and insufficient when
+the evidence cannot justify either. Quote the shortest source excerpt that supports your
+assessment and list concrete risk flags such as same_name_collision, weak_context,
+historical_team_conflict, role_mismatch, or candidate_missing.
+""".strip()

@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import and_, case, exists, or_, select
 from sqlalchemy.dialects.postgresql import insert
 
 from src.db.engine import DatabaseResources, create_database_resources
@@ -281,8 +281,73 @@ class ResolutionRepository:
             .where(
                 entity_mentions.c.resolution_status.in_(["ambiguous", "unresolved"]),
                 entity_mentions.c.last_bank_version_id.is_distinct_from(bank_version_id),
+                entity_mentions.c.resolution_metadata[
+                    "manual_lock"
+                ].as_boolean().is_not(True),
             )
             .order_by(entity_mentions.c.updated_at)
+            .limit(limit)
+        )
+        with self.resources.engine.connect() as connection:
+            return [dict(row) for row in connection.execute(statement).mappings()]
+
+    def load_mentions_for_accuracy_sweep(
+        self,
+        *,
+        scope: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Load bounded source context for a no-write, manually triggered audit."""
+
+        statuses = {
+            "needs_review": ["ambiguous", "unresolved"],
+            "resolved": ["resolved"],
+            "all": ["ambiguous", "unresolved", "resolved", "ignored"],
+        }.get(scope)
+        if statuses is None:
+            raise ValueError("scope must be needs_review, resolved, or all")
+
+        market_event = polymarket_events.alias("sweep_market_event")
+        direct_event = polymarket_events.alias("sweep_direct_event")
+        statement = (
+            select(
+                entity_mentions,
+                news_events.c.text.label("news_text"),
+                polymarket_markets.c.question.label("market_question"),
+                polymarket_markets.c.slug.label("market_slug"),
+                market_event.c.title.label("market_event_title"),
+                direct_event.c.title.label("direct_event_title"),
+            )
+            .outerjoin(news_events, news_events.c.news_id == entity_mentions.c.news_id)
+            .outerjoin(
+                polymarket_markets,
+                polymarket_markets.c.market_id
+                == entity_mentions.c.polymarket_market_id,
+            )
+            .outerjoin(
+                market_event,
+                market_event.c.event_id == polymarket_markets.c.event_id,
+            )
+            .outerjoin(
+                direct_event,
+                direct_event.c.event_id == entity_mentions.c.polymarket_event_id,
+            )
+            .where(
+                entity_mentions.c.resolution_status.in_(statuses),
+                entity_mentions.c.resolution_metadata[
+                    "manual_lock"
+                ].as_boolean().is_not(True),
+            )
+            .order_by(
+                case(
+                    (entity_mentions.c.resolution_status == "ambiguous", 0),
+                    (entity_mentions.c.resolution_status == "unresolved", 1),
+                    (entity_mentions.c.resolution_status == "resolved", 2),
+                    else_=3,
+                ),
+                entity_mentions.c.updated_at,
+                entity_mentions.c.mention_id,
+            )
             .limit(limit)
         )
         with self.resources.engine.connect() as connection:
@@ -357,6 +422,9 @@ class ResolutionRepository:
                             "last_observed_at": statement.excluded.last_observed_at,
                             "updated_at": now,
                         },
+                        where=entity_mentions.c.resolution_metadata[
+                            "manual_lock"
+                        ].as_boolean().is_not(True),
                     ),
                     mention_rows,
                 )

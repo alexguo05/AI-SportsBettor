@@ -75,6 +75,40 @@ event and market tables.
 
 ## No-write audits
 
+### Manually triggered high-accuracy sweep
+
+The accuracy sweep is a separate, intentionally expensive audit of existing
+mention resolutions. It expands candidate retrieval, runs two independent
+strong-model adjudications per mention, and reports consensus confirmations,
+proposed changes, pass disagreements, low-confidence results, and errors. It
+never writes PostgreSQL; proposed changes must be accepted through the
+dashboard's audited manual-adjudication control.
+
+Run a deterministic, no-network smoke test:
+
+```bash
+python -m src.entity_bank.accuracy_sweep \
+  --provider mock \
+  --scope needs_review \
+  --limit 20
+```
+
+Run the billable strong-model sweep only after selecting a bounded scope and
+limit:
+
+```bash
+python -m src.entity_bank.accuracy_sweep \
+  --provider claude \
+  --model claude-opus-5 \
+  --scope needs_review \
+  --limit 50 \
+  --confirm-network RUN_ENTITY_ACCURACY_SWEEP
+```
+
+Each run writes `progress.json`, `summary.json`, and `findings.jsonl` under
+`data/local/entity_accuracy_sweep/`. Manual review locks are excluded. No
+`--apply` option exists by design.
+
 The most complete pre-database audit fetches live nflverse and Gamma data,
 optionally calls Claude, and writes only local files:
 

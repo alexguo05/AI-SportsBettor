@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from src.enrich_news.prompt import ENTITY_EXTRACTOR_VERSION
+from src.entity_bank.accuracy_sweep import run_sweep_records
 from src.entity_bank.gamma_backfill import main as gamma_backfill_main
 from src.entity_bank.models import (
     CandidateEntity,
@@ -1261,3 +1262,45 @@ def test_live_write_commands_require_explicit_confirmation() -> None:
     assert nflverse_sync_main(["--apply"]) == 2
     assert gamma_backfill_main(["--apply"]) == 2
     assert worker_main(["--apply", "--provider", "mock"]) == 2
+
+
+def test_accuracy_sweep_uses_two_passes_and_proposes_consensus_change() -> None:
+    row = {
+        "mention_id": "mention-1",
+        "news_id": "news-1",
+        "polymarket_market_id": None,
+        "polymarket_event_id": None,
+        "mention_text": "Josh Allen",
+        "entity_type_hint": "person",
+        "person_role_hint": "player",
+        "mention_role": "subject",
+        "evidence": "Bills quarterback Josh Allen practiced in full.",
+        "source_refs": ["tweet"],
+        "resolution_status": "ambiguous",
+        "entity_id": None,
+        "match_method": None,
+        "confidence": 0.4,
+        "candidate_entity_ids": [],
+        "resolver_version": "entity-resolver-v4",
+        "resolution_metadata": {},
+        "last_observed_at": NOW,
+        "updated_at": NOW,
+        "news_text": "Bills quarterback Josh Allen practiced in full.",
+        "market_question": None,
+        "market_slug": None,
+        "market_event_title": None,
+        "direct_event_title": None,
+    }
+
+    findings, summary = run_sweep_records(
+        [row],
+        candidate_rows=[candidate_row("entity-1", "Josh Allen")],
+        provider=DeterministicEntityProvider(),
+    )
+
+    assert summary["processed"] == 1
+    assert summary["proposed_change"] == 1
+    assert findings[0]["outcome"] == "proposed_change"
+    assert findings[0]["recommended_resolution"]["entity_id"] == "entity-1"
+    assert len(findings[0]["pass_decisions"]) == 2
+    assert findings[0]["expected_updated_at"] == NOW

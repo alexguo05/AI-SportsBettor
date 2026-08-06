@@ -10,6 +10,7 @@ from typing import Any, Protocol
 from anthropic import Anthropic
 
 from src.entity_bank.models import (
+    AccuracySweepDecision,
     CandidateEntity,
     EntityType,
     ExtractedMention,
@@ -23,6 +24,7 @@ from src.entity_bank.models import (
 )
 from src.entity_bank.normalization import infer_contract_type, normalize_name, placeholder_reason
 from src.entity_bank.prompt import (
+    ACCURACY_SWEEP_SYSTEM_PROMPT,
     MARKET_SYSTEM_PROMPT,
     RESOLUTION_SYSTEM_PROMPT,
 )
@@ -62,6 +64,17 @@ class EntityProvider(Protocol):
         candidates: list[CandidateEntity],
         source_context: str,
         as_of: datetime,
+    ) -> ProviderResult: ...
+
+    def adjudicate_accuracy_sweep(
+        self,
+        *,
+        mention: ExtractedMention,
+        candidates: list[CandidateEntity],
+        source_context: str,
+        current_resolution: dict[str, Any],
+        as_of: datetime,
+        pass_number: int,
     ) -> ProviderResult: ...
 
 
@@ -169,6 +182,38 @@ class ClaudeEntityProvider:
             raise ValueError("resolver returned non-allowlisted candidate IDs")
         return result
 
+    def adjudicate_accuracy_sweep(
+        self,
+        *,
+        mention: ExtractedMention,
+        candidates: list[CandidateEntity],
+        source_context: str,
+        current_resolution: dict[str, Any],
+        as_of: datetime,
+        pass_number: int,
+    ) -> ProviderResult:
+        result = self._parse(
+            system=ACCURACY_SWEEP_SYSTEM_PROMPT,
+            payload={
+                "independent_pass": pass_number,
+                "as_of": as_of.isoformat(),
+                "mention": mention.model_dump(mode="json"),
+                "source_context": source_context,
+                "current_resolution": current_resolution,
+                "allowed_candidates": [
+                    candidate.model_dump(mode="json") for candidate in candidates
+                ],
+            },
+            output_format=AccuracySweepDecision,
+        )
+        allowed = {candidate.entity_id for candidate in candidates}
+        decision: AccuracySweepDecision = result.output
+        if decision.entity_id is not None and decision.entity_id not in allowed:
+            raise ValueError(f"sweep returned non-allowlisted entity ID {decision.entity_id}")
+        if not set(decision.candidate_entity_ids).issubset(allowed):
+            raise ValueError("sweep returned non-allowlisted candidate IDs")
+        return result
+
 
 class DeterministicEntityProvider:
     """Offline control-flow fixture; its semantic output is never persisted."""
@@ -272,4 +317,39 @@ class DeterministicEntityProvider:
             usage=ProviderUsage(),
             provider=self.provider_name,
             model_name=self.model_name,
+        )
+
+    def adjudicate_accuracy_sweep(
+        self,
+        *,
+        mention: ExtractedMention,
+        candidates: list[CandidateEntity],
+        source_context: str,
+        current_resolution: dict[str, Any],
+        as_of: datetime,
+        pass_number: int,
+    ) -> ProviderResult:
+        del pass_number
+        base = self.adjudicate(
+            mention=mention,
+            candidates=candidates,
+            source_context=source_context,
+            as_of=as_of,
+        )
+        decision: ResolutionDecision = base.output
+        same = (
+            decision.status.value == current_resolution.get("resolution_status")
+            and decision.entity_id == current_resolution.get("entity_id")
+        )
+        output = AccuracySweepDecision(
+            **decision.model_dump(),
+            current_decision_assessment="confirmed" if same else "change",
+            evidence_quote=mention.evidence,
+            risk_flags=[] if same else ["deterministic_fixture_disagreement"],
+        )
+        return ProviderResult(
+            output=output,
+            usage=base.usage,
+            provider=base.provider,
+            model_name=base.model_name,
         )

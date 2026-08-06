@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -180,3 +181,11 @@ class ResolutionDecision(BaseModel):
         if self.status != ResolutionStatus.RESOLVED and self.entity_id is not None:
             raise ValueError("only resolved decisions may include entity_id")
         return self
+
+
+class AccuracySweepDecision(ResolutionDecision):
+    """Independent high-accuracy assessment of an existing resolution."""
+
+    current_decision_assessment: Literal["confirmed", "change", "insufficient"]
+    evidence_quote: str = Field(min_length=1, max_length=2_000)
+    risk_flags: list[str] = Field(default_factory=list, max_length=12)

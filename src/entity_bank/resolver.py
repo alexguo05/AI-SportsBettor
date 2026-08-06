@@ -139,6 +139,32 @@ class CandidateIndex:
             key=lambda candidate: (-candidate.lexical_score, candidate.canonical_name),
         )[:limit]
 
+    def get(self, entity_id: str) -> CandidateEntity | None:
+        for row_index, row in enumerate(self.rows):
+            if row["entity_id"] != entity_id:
+                continue
+            return CandidateEntity(
+                entity_id=row["entity_id"],
+                canonical_name=row["canonical_name"],
+                entity_type=row["entity_type"],
+                identity_status=row["identity_status"],
+                aliases=sorted({row["canonical_name"], *row.get("aliases", [])}),
+                roles=sorted(set(row.get("roles", []))),
+                teams=sorted(set(row.get("teams", []))),
+                lexical_score=max(
+                    (
+                        SequenceMatcher(
+                            None,
+                            normalize_name(row["canonical_name"]),
+                            alias,
+                        ).ratio()
+                        for alias in self._aliases[row_index]
+                    ),
+                    default=1.0,
+                ),
+            )
+        return None
+
 
 def mention_id(
     source: SourceReference,
