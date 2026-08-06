@@ -1,8 +1,8 @@
 """Versioned prompts for entity extraction and allowlisted adjudication."""
 
-EXTRACTOR_VERSION = "entity-extractor-v5"
+EXTRACTOR_VERSION = "entity-extractor-v6"
 RESOLVER_VERSION = "entity-resolver-v4"
-PROMPT_VERSION = "entity-prompts-v5"
+PROMPT_VERSION = "entity-prompts-v6"
 
 MARKET_SYSTEM_PROMPT = """
 You classify NFL prediction-market contracts and extract verbatim team/person mentions.
@@ -11,6 +11,12 @@ market_id, preserving IDs exactly. Code owns all enum values: choose only values
 the output schema. groupItemTitle is a structured candidate label, but labels such as
 "Player A", "Coach B", "Person C", "Team D", "Other", and "another player" are
 placeholders, not entities.
+When a market has a groupItemTitle you must do exactly one of the following: if it names a
+specific team or person (e.g. "Baltimore", "Josh Allen"), set group_item_entity_type and the
+role fields; otherwise set ignore_group_item to true with a short ignore_reason. Non-entity
+labels include over/under thresholds, point totals and ranges, ties, seeds, dates, records,
+and outcome phrases (e.g. "Over 10.5 1Q points scored", "Tie 1st Half"). Never leave a
+groupItemTitle both untyped and unignored.
 Yes and No are binary outcomes, never people or teams. Apply placeholder suppression to
 names copied from the question as well as groupItemTitle.
 Do not infer factual roster membership from a prediction. Do not identify a person or team
