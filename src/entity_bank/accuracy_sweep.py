@@ -5,11 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import uuid
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
+from urllib.parse import urlparse
+
+from google.cloud import storage
 
 from src.enrich_news.config import load_enrichment_settings
 from src.entity_bank.models import (
@@ -46,6 +50,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider", choices=("mock", "claude"), default="claude")
     parser.add_argument("--model", default=os.getenv("ENTITY_SWEEP_MODEL", DEFAULT_MODEL))
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--output-gcs-uri",
+        help="Durable gs://bucket/prefix destination used by hosted sweep jobs.",
+    )
     parser.add_argument(
         "--confidence-threshold",
         type=float,
@@ -260,18 +268,83 @@ def run_sweep_records(
     }
 
 
-def _write_json(path: Path, value: dict[str, Any]) -> None:
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(
-        json.dumps(value, default=str, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+class SweepOutput(Protocol):
+    @property
+    def location(self) -> str: ...
+
+    def write_json(self, name: str, value: dict[str, Any]) -> None: ...
+
+    def write_findings(self, findings: Iterable[dict[str, Any]]) -> None: ...
+
+
+def _json_text(value: dict[str, Any]) -> str:
+    return json.dumps(value, default=str, indent=2, sort_keys=True) + "\n"
+
+
+class LocalSweepOutput:
+    def __init__(self, output_dir: Path) -> None:
+        self.output_dir = output_dir
+        self.output_dir.mkdir(parents=True, exist_ok=False)
+
+    @property
+    def location(self) -> str:
+        return str(self.output_dir.resolve())
+
+    def write_json(self, name: str, value: dict[str, Any]) -> None:
+        path = self.output_dir / name
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(_json_text(value), encoding="utf-8")
+        temporary.replace(path)
+
+    def write_findings(self, findings: Iterable[dict[str, Any]]) -> None:
+        with (self.output_dir / "findings.jsonl").open("w", encoding="utf-8") as handle:
+            for finding in findings:
+                handle.write(json.dumps(finding, default=str, sort_keys=True) + "\n")
+
+
+class GcsSweepOutput:
+    def __init__(self, output_uri: str, *, client: storage.Client | None = None) -> None:
+        parsed = urlparse(output_uri)
+        if parsed.scheme != "gs" or not parsed.netloc or not parsed.path.strip("/"):
+            raise ValueError("--output-gcs-uri must be gs://bucket/non-empty-prefix")
+        self.bucket_name = parsed.netloc
+        self.prefix = parsed.path.strip("/")
+        self.client = client or storage.Client()
+
+    @property
+    def location(self) -> str:
+        return f"gs://{self.bucket_name}/{self.prefix}"
+
+    def _blob(self, name: str) -> Any:
+        return self.client.bucket(self.bucket_name).blob(f"{self.prefix}/{name}")
+
+    def write_json(self, name: str, value: dict[str, Any]) -> None:
+        self._blob(name).upload_from_string(
+            _json_text(value),
+            content_type="application/json",
+        )
+
+    def write_findings(self, findings: Iterable[dict[str, Any]]) -> None:
+        payload = "".join(
+            json.dumps(finding, default=str, sort_keys=True) + "\n" for finding in findings
+        )
+        self._blob("findings.jsonl").upload_from_string(
+            payload,
+            content_type="application/x-ndjson",
+        )
 
 
 def _default_output_dir() -> Path:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return Path("data/local/entity_accuracy_sweep") / f"{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _output_store(args: argparse.Namespace) -> SweepOutput:
+    if args.output_dir and args.output_gcs_uri:
+        raise ValueError("Pass only one of --output-dir or --output-gcs-uri")
+    if args.output_gcs_uri:
+        return GcsSweepOutput(args.output_gcs_uri)
+    return LocalSweepOutput(args.output_dir or _default_output_dir())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -286,11 +359,13 @@ def main(argv: list[str] | None = None) -> int:
             f"--confirm-network {NETWORK_CONFIRMATION}"
         )
 
-    output_dir = args.output_dir or _default_output_dir()
-    output_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        output = _output_store(args)
+    except ValueError as error:
+        raise SystemExit(str(error)) from error
     started_at = datetime.now(UTC)
-    _write_json(
-        output_dir / "progress.json",
+    output.write_json(
+        "progress.json",
         {
             "status": "starting",
             "processed": 0,
@@ -300,52 +375,67 @@ def main(argv: list[str] | None = None) -> int:
         },
     )
 
-    settings = load_enrichment_settings(Path("src"))
-    provider: EntityProvider
-    if args.provider == "mock":
-        provider = DeterministicEntityProvider()
-    else:
-        provider = ClaudeEntityProvider(
-            settings.api_key or "",
-            model_name=args.model,
-            max_tokens=int(os.getenv("ENTITY_SWEEP_MAX_OUTPUT_TOKENS", "4096")),
-            timeout_seconds=180,
-        )
-
-    repository = ResolutionRepository.from_environment(Path("src"))
     try:
-        records = repository.load_mentions_for_accuracy_sweep(
-            scope=args.scope,
-            limit=args.limit,
-        )
-        candidate_rows = repository.load_candidate_rows()
-
-        def update_progress(processed: int, total: int, counts: dict[str, int]) -> None:
-            _write_json(
-                output_dir / "progress.json",
-                {
-                    "status": "running",
-                    "processed": processed,
-                    "total": total,
-                    "counts": counts,
-                    "started_at": started_at,
-                    "updated_at": datetime.now(UTC),
-                },
+        settings = load_enrichment_settings(Path("src"))
+        provider: EntityProvider
+        if args.provider == "mock":
+            provider = DeterministicEntityProvider()
+        else:
+            provider = ClaudeEntityProvider(
+                settings.api_key or "",
+                model_name=args.model,
+                max_tokens=int(os.getenv("ENTITY_SWEEP_MAX_OUTPUT_TOKENS", "4096")),
+                timeout_seconds=180,
             )
 
-        findings, counters = run_sweep_records(
-            records,
-            candidate_rows=candidate_rows,
-            provider=provider,
-            confidence_threshold=args.confidence_threshold,
-            progress=update_progress,
-        )
-    finally:
-        repository.close()
+        repository = ResolutionRepository.from_environment(Path("src"))
+        try:
+            records = repository.load_mentions_for_accuracy_sweep(
+                scope=args.scope,
+                limit=args.limit,
+            )
+            candidate_rows = repository.load_candidate_rows()
 
-    with (output_dir / "findings.jsonl").open("w", encoding="utf-8") as handle:
-        for finding in findings:
-            handle.write(json.dumps(finding, default=str, sort_keys=True) + "\n")
+            def update_progress(processed: int, total: int, counts: dict[str, int]) -> None:
+                output.write_json(
+                    "progress.json",
+                    {
+                        "status": "running",
+                        "processed": processed,
+                        "total": total,
+                        "counts": counts,
+                        "started_at": started_at,
+                        "updated_at": datetime.now(UTC),
+                    },
+                )
+
+            findings, counters = run_sweep_records(
+                records,
+                candidate_rows=candidate_rows,
+                provider=provider,
+                confidence_threshold=args.confidence_threshold,
+                progress=update_progress,
+            )
+        finally:
+            repository.close()
+    except Exception as error:
+        completed_at = datetime.now(UTC)
+        output.write_json(
+            "progress.json",
+            {
+                "status": "failed",
+                "processed": 0,
+                "total": 0,
+                "counts": {"error": 1},
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "error": f"{type(error).__name__}: {error}",
+            },
+        )
+        print(f"Accuracy sweep failed: {type(error).__name__}: {error}", file=sys.stderr)
+        return 1
+
+    output.write_findings(findings)
 
     completed_at = datetime.now(UTC)
     summary = {
@@ -362,12 +452,12 @@ def main(argv: list[str] | None = None) -> int:
         "passes_per_mention": 2,
         "started_at": started_at,
         "completed_at": completed_at,
-        "output_dir": str(output_dir.resolve()),
+        "output_location": output.location,
         **counters,
     }
-    _write_json(output_dir / "summary.json", summary)
-    _write_json(
-        output_dir / "progress.json",
+    output.write_json("summary.json", summary)
+    output.write_json(
+        "progress.json",
         {
             "status": summary["status"],
             "processed": counters["processed"],

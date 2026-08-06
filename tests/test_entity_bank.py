@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from src.enrich_news.prompt import ENTITY_EXTRACTOR_VERSION
-from src.entity_bank.accuracy_sweep import run_sweep_records
+from src.entity_bank.accuracy_sweep import GcsSweepOutput, run_sweep_records
 from src.entity_bank.gamma_backfill import main as gamma_backfill_main
 from src.entity_bank.models import (
     CandidateEntity,
@@ -74,6 +75,31 @@ class FakeNflverseSession:
 
     def get(self, url: str, **_kwargs: Any) -> FakeHttpResponse:
         return self.responses[url]
+
+
+class FakeSweepBlob:
+    def __init__(self, values: dict[str, tuple[str, str]], name: str) -> None:
+        self.values = values
+        self.name = name
+
+    def upload_from_string(self, value: str, *, content_type: str) -> None:
+        self.values[self.name] = (value, content_type)
+
+
+class FakeSweepBucket:
+    def __init__(self, values: dict[str, tuple[str, str]]) -> None:
+        self.values = values
+
+    def blob(self, name: str) -> FakeSweepBlob:
+        return FakeSweepBlob(self.values, name)
+
+
+class FakeSweepStorageClient:
+    def __init__(self) -> None:
+        self.values: dict[str, tuple[str, str]] = {}
+
+    def bucket(self, _name: str) -> FakeSweepBucket:
+        return FakeSweepBucket(self.values)
 
 
 class FakeSnapshotClient:
@@ -1456,3 +1482,25 @@ def test_accuracy_sweep_uses_two_passes_and_proposes_consensus_change() -> None:
     assert findings[0]["recommended_resolution"]["entity_id"] == "entity-1"
     assert len(findings[0]["pass_decisions"]) == 2
     assert findings[0]["expected_updated_at"] == NOW
+
+
+def test_accuracy_sweep_writes_durable_gcs_outputs() -> None:
+    client = FakeSweepStorageClient()
+    output = GcsSweepOutput(
+        "gs://sweep-results/entity-accuracy-sweeps/run-1",
+        client=client,  # type: ignore[arg-type]
+    )
+
+    output.write_json("progress.json", {"status": "running", "processed": 1})
+    output.write_findings([{"mention_id": "mention-1", "outcome": "confirmed"}])
+
+    progress, progress_type = client.values[
+        "entity-accuracy-sweeps/run-1/progress.json"
+    ]
+    findings, findings_type = client.values[
+        "entity-accuracy-sweeps/run-1/findings.jsonl"
+    ]
+    assert json.loads(progress)["processed"] == 1
+    assert json.loads(findings)["mention_id"] == "mention-1"
+    assert progress_type == "application/json"
+    assert findings_type == "application/x-ndjson"

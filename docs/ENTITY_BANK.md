@@ -106,8 +106,10 @@ python -m src.entity_bank.accuracy_sweep \
 ```
 
 Each run writes `progress.json`, `summary.json`, and `findings.jsonl` under
-`data/local/entity_accuracy_sweep/`. Manual review locks are excluded. No
-`--apply` option exists by design.
+`data/local/entity_accuracy_sweep/`. A hosted Cloud Run Job instead supplies
+`--output-gcs-uri gs://BUCKET/entity-accuracy-sweeps/RUN_ID` so progress and
+findings survive container shutdown and dashboard restarts. Manual review
+locks are excluded. No `--apply` option exists by design.
 
 The most complete pre-database audit fetches live nflverse and Gamma data,
 optionally calls Claude, and writes only local files:
