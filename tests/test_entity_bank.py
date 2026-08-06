@@ -298,7 +298,18 @@ def test_nflverse_snapshot_merges_franchise_aliases_and_preserves_duplicate_name
     rams = next(
         entity for entity in team_entities if entity["canonical_name"] == "Los Angeles Rams"
     )
-    assert {"LAR", "STL", "St. Louis Rams"}.issubset({alias["alias"] for alias in rams["aliases"]})
+    rams_aliases = {alias["alias"] for alias in rams["aliases"]}
+    assert {"LAR", "STL", "St. Louis Rams"}.issubset(rams_aliases)
+    # Bare locations are aliases so mentions like "Tampa Bay" resolve mechanically.
+    assert {"Los Angeles", "St. Louis"}.issubset(rams_aliases)
+    location_aliases = {
+        alias["alias"] for alias in rams["aliases"] if alias["alias_type"] == "location"
+    }
+    assert location_aliases == {"Los Angeles", "St. Louis"}
+    bills = next(
+        entity for entity in team_entities if entity["canonical_name"] == "Buffalo Bills"
+    )
+    assert "Buffalo" in {alias["alias"] for alias in bills["aliases"]}
     assert len(people) == 2
     assert people[0]["entity_id"] != people[1]["entity_id"]
     assert {entity["canonical_name"] for entity in snapshot.complete_player_history} == {

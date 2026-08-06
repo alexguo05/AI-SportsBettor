@@ -207,10 +207,21 @@ def _normalize_teams(
         entity_id = _entity_id("team", team_id)
         aliases: dict[tuple[str, str], dict[str, str]] = {}
         for row in variants:
+            team_name = row.get("team_name", "").strip()
+            team_nick = row.get("team_nick", "").strip()
+            # Markets and tweets routinely name a team by bare location
+            # ("Tampa Bay", "Arizona"), which is never an nflverse column;
+            # derive it as the full name minus the nickname suffix.
+            location = (
+                team_name[: -len(team_nick)].strip()
+                if team_nick and team_name.endswith(team_nick)
+                else ""
+            )
             for value, alias_type in (
-                (row.get("team_name", "").strip(), AliasType.FULL_NAME),
-                (row.get("team_nick", "").strip(), AliasType.NICKNAME),
+                (team_name, AliasType.FULL_NAME),
+                (team_nick, AliasType.NICKNAME),
                 (row.get("team_abbr", "").strip(), AliasType.ABBREVIATION),
+                (location, AliasType.LOCATION),
             ):
                 if value:
                     item = _alias(value, alias_type)

@@ -100,6 +100,7 @@ class AliasType(StrEnum):
     FOOTBALL_NAME = "football_name"
     ABBREVIATION = "abbreviation"
     NICKNAME = "nickname"
+    LOCATION = "location"
     INITIALS = "initials"
     FORMER_NAME = "former_name"
     MANUAL = "manual"
